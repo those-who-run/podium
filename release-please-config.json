@@ -4,6 +4,7 @@
   "include-component-in-tag": false,
   "include-v-in-tag": true,
   "include-v-in-release-name": false,
+  "initial-version": "0.1.0",
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": true,
   "pull-request-title-pattern": "chore(release): ${version}",
