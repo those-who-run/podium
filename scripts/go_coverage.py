@@ -5,7 +5,7 @@
 Run from the module's directory, after `go test -coverprofile`. It leaves out
 generated files, those with Go's `// Code generated … DO NOT EDIT.` line before
 their package clause (https://go.dev/s/generatedcode), as go.yml's go_check.py
-does in those-who-run/.github (from its v0.2.4, those-who-run/.github#27), so
+does in those-who-run/.github (from its v0.2.4: those-who-run/.github#27 and #29), so
 `make check` and CI's `go / check` measure the same statements. It prints the
 total and fails below the floor. Standard library only.
 """
@@ -23,16 +23,32 @@ TOTAL = re.compile(r"^total:\s+\(statements\)\s+([\d.]+)%\s*$", re.MULTILINE)
 
 
 def is_generated(path: str) -> bool:
-    """Whether the Go file has the generated-code line before its package clause."""
+    """Whether the Go file has the generated-code line before its package clause.
+
+    As go/ast's IsGenerated: only comments come before the package clause, line or
+    block, and any other text there (the clause itself, even after a block comment
+    on its line) ends the search."""
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            in_block = False
             for line in f:
-                line = line.rstrip("\r\n")
-                if GENERATED.match(line):
-                    return True
-                stripped = line.strip()
-                if stripped and not stripped.startswith(("//", "/*", "*")):
-                    return False
+                rest = line.rstrip("\r\n")
+                while True:
+                    if in_block:
+                        end = rest.find("*/")
+                        if end < 0:
+                            break
+                        rest, in_block = rest[end + 2 :], False
+                    rest = rest.lstrip()
+                    if not rest:
+                        break
+                    if rest.startswith("//"):
+                        if GENERATED.match(rest):
+                            return True
+                        break
+                    if not rest.startswith("/*"):
+                        return False
+                    rest, in_block = rest[2:], True
     except OSError:
         return False
     return False
@@ -58,14 +74,22 @@ def drop_generated(lines: list[str], dirs: dict[str, str]) -> tuple[list[str], l
     return kept, sorted(dropped)
 
 
-def package_dirs() -> dict[str, str]:
+def package_dirs() -> dict[str, str] | None:
+    """Each package's directory, by import path; None when `go list` fails."""
     out = subprocess.run(
         ["go", "list", "-f", "{{.ImportPath}}\t{{.Dir}}", "./..."],
         capture_output=True,
         text=True,
-        check=True,
     )
+    if out.returncode != 0:
+        print(out.stdout + out.stderr, end="", file=sys.stderr)
+        return None
     return dict(line.split("\t", 1) for line in out.stdout.splitlines() if "\t" in line)
+
+
+def statements(lines: list[str]) -> int:
+    """How many statements a cover profile's blocks hold."""
+    return sum(int(line.split()[-2]) for line in lines if line.strip() and not line.startswith("mode:"))
 
 
 def main(argv: list[str]) -> int:
@@ -73,11 +97,21 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     profile, floor = argv[0], float(argv[1])
+    dirs = package_dirs()
+    if dirs is None:
+        print("go list failed, so generated files can't be left out of coverage", file=sys.stderr)
+        return 1
     with open(profile, encoding="utf-8") as f:
-        kept, dropped = drop_generated(f.readlines(), package_dirs())
+        kept, dropped = drop_generated(f.readlines(), dirs)
     if dropped:
         print(f"Coverage leaves out {len(dropped)} generated file(s): " + ", ".join(dropped))
-    with tempfile.NamedTemporaryFile("w", suffix=".out", delete=False, encoding="utf-8") as f:
+    if not statements(kept):
+        print("Coverage: no statements are left once generated files are left out, so the floor doesn't apply.")
+        return 0
+    # Beside the profile, with the rest of the build's output.
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".out", dir=os.path.dirname(os.path.abspath(profile)), delete=False, encoding="utf-8"
+    ) as f:
         f.writelines(kept)
         filtered = f.name
     try:
