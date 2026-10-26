@@ -1,0 +1,10 @@
+# Written by copier from those-who-run/chassis: what `copier update` needs to bring
+# the template's later changes in. Change it only through copier.
+_commit: da3a2cc
+_src_path: https://github.com/those-who-run/chassis.git
+description: 'The results cards for Those Who Run v2: when a session ends, it posts
+    the session''s results card to Discord over its REST API. It is the home for everything
+    posted after a session.'
+image: true
+name: podium
+title: podium
