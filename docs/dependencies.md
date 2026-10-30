@@ -27,5 +27,5 @@ the test reads.
 
 | Module | Why |
 | --- | --- |
-
-The module has no direct dependencies yet: the table is empty.
+| `github.com/those-who-run/contracts` | The `SessionEnded` message a card is built from (paddock ADR 0002), and its `format` package, which writes the card's times and fuel figures as the pit wall does (paddock#128). |
+| `google.golang.org/protobuf` | The runtime the contracts' generated code is written for; the tests build messages with its helpers (`proto.Clone`, `timestamppb`). |

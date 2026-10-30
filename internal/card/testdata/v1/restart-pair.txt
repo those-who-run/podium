@@ -1,0 +1,7 @@
+Suzuka Circuit · timed race
+http://pitwall.test/?session=20260101-000032
+6 laps, P1 of 17
+  Best lap: 2:28.205 (lap 6)
+  Car: Honda Civic Type R (EK) Touring Car
+  Engineer restarted: on lap 7
+-- colour=0x333333 footer=Those Who Run 走り屋 timestamp=1767225632.935134
