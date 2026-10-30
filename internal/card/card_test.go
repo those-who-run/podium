@@ -243,27 +243,25 @@ func TestTrackNameNeedsConfidenceOrAFamily(t *testing.T) {
 }
 
 func TestKindLabel(t *testing.T) {
-	unknown := eventsv1.SessionType_SESSION_TYPE_UNKNOWN
 	for _, tc := range []struct {
-		kind, summary eventsv1.SessionType
-		laps          int
-		want          string
+		kind eventsv1.SessionType
+		laps int
+		want string
 	}{
-		{eventsv1.SessionType_SESSION_TYPE_LAP_RACE, unknown, 5, "5-lap race"},
-		{eventsv1.SessionType_SESSION_TYPE_TIMED_FIELD, unknown, 0, "timed race"},
-		{eventsv1.SessionType_SESSION_TYPE_SOLO_TIMED, unknown, 0, "time trial"},
-		{eventsv1.SessionType_SESSION_TYPE_SOLO_LAPS, unknown, 3, "3-lap run"},
-		{unknown, eventsv1.SessionType_SESSION_TYPE_RACE, 0, "race"},
-		{unknown, eventsv1.SessionType_SESSION_TYPE_TIME_TRIAL, 0, "time trial"},
-		{unknown, eventsv1.SessionType_SESSION_TYPE_PRACTICE, 0, "practice"},
-		{unknown, unknown, 0, "session"},
+		{eventsv1.SessionType_SESSION_TYPE_LAP_RACE, 5, "5-lap race"},
+		{eventsv1.SessionType_SESSION_TYPE_TIMED_FIELD, 0, "timed race"},
+		{eventsv1.SessionType_SESSION_TYPE_SOLO_TIMED, 0, "time trial"},
+		{eventsv1.SessionType_SESSION_TYPE_SOLO_LAPS, 3, "3-lap run"},
+		{eventsv1.SessionType_SESSION_TYPE_UNKNOWN, 0, "session"},
+		{eventsv1.SessionType_SESSION_TYPE_UNSPECIFIED, 0, "session"},
 	} {
-		if got := KindLabel(tc.kind, tc.laps, tc.summary); got != tc.want {
-			t.Errorf("%v/%v: %q, want %q", tc.kind, tc.summary, got, tc.want)
+		if got := KindLabel(tc.kind, tc.laps); got != tc.want {
+			t.Errorf("%v: %q, want %q", tc.kind, got, tc.want)
 		}
 	}
 	e := race()
 	e.Summary.Kind = nil
+	e.Summary.SessionType = eventsv1.SessionType_SESSION_TYPE_LAP_RACE // ignored: kind is the verdict
 	if c := build(t, e); c.Title != "Sportsland SUGO · session" || c.Description != "2 laps" {
 		t.Errorf("no kind: %q, %q", c.Title, c.Description)
 	}

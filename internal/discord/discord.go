@@ -5,8 +5,10 @@
 // on the channel, as v1's did.
 //
 // A Poster sends once. Retries, and posting each card exactly once, are its
-// caller's (paddock#67); StatusError's Permanent says which failures a retry
-// cannot fix.
+// caller's (paddock#67): StatusError's Permanent says which failures a retry
+// cannot fix, and its RetryAfter how long a rate limit asks to wait. A message
+// Discord took is never reported as a failure, even when its id can't be read,
+// so a retry never posts a card twice.
 package discord
 
 import (
@@ -16,7 +18,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +54,9 @@ type Poster struct {
 	ChannelID string
 	// HTTP is the client it sends with; nil is one with a 30 s timeout.
 	HTTP *http.Client
+	// Logger is where it warns of a message sent whose id it couldn't read; nil
+	// is slog.Default().
+	Logger *slog.Logger
 }
 
 // StatusError is a response from Discord other than a success.
@@ -57,6 +65,10 @@ type StatusError struct {
 	Status int
 	// Body is the start of the response's body: Discord's JSON error.
 	Body string
+	// RetryAfter is how long Discord asks for before the next try, on a 429
+	// (rate limited): its Retry-After header, else the body's retry_after, both
+	// in seconds. Zero when it gave none.
+	RetryAfter time.Duration
 }
 
 func (e *StatusError) Error() string {
@@ -108,20 +120,57 @@ func (p *Poster) Send(ctx context.Context, c card.Card) (string, error) {
 		return "", fmt.Errorf("discord: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
-	if err != nil {
-		return "", fmt.Errorf("discord: reading the response: %w", err)
-	}
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return "", &StatusError{Status: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+		e := &StatusError{Status: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			e.RetryAfter = retryAfter(resp.Header.Get("Retry-After"), data)
+		}
+		return "", e
 	}
+	// The message was sent: a caller that retried now would post it twice
+	// (paddock#67), so an id that can't be read is a warning, not a failure.
 	var sent struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(data, &sent); err != nil {
-		return "", fmt.Errorf("discord: the message sent, its id unreadable: %w", err)
+	if readErr == nil {
+		readErr = json.Unmarshal(data, &sent)
+	}
+	if readErr != nil || sent.ID == "" {
+		logger := p.Logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		// Neither the body nor the error, which may quote it, is logged.
+		why := "no id in the answer"
+		if readErr != nil {
+			why = "the answer is unreadable"
+		}
+		logger.WarnContext(ctx, "discord: card posted, its message id unknown",
+			"status", resp.StatusCode, "channel", p.ChannelID, "why", why)
+		return "", nil
 	}
 	return sent.ID, nil
+}
+
+// retryAfter is the wait a 429 asks for: the Retry-After header's seconds, else
+// the JSON body's retry_after (seconds, with a fraction). Zero when neither
+// reads as a wait.
+func retryAfter(header string, body []byte) time.Duration {
+	secs, err := strconv.ParseFloat(strings.TrimSpace(header), 64)
+	if err != nil {
+		var limited struct {
+			RetryAfter float64 `json:"retry_after"`
+		}
+		if json.Unmarshal(body, &limited) != nil {
+			return 0
+		}
+		secs = limited.RetryAfter
+	}
+	if !(secs > 0) || math.IsInf(secs, 0) || secs > 24*3600 {
+		return 0
+	}
+	return time.Duration(secs * float64(time.Second))
 }
 
 type message struct {

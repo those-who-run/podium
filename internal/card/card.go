@@ -8,13 +8,14 @@
 //
 // Where v1 read summary.json, the card reads SessionEnded's summary, which
 // carries the same fields (contracts' SessionSummary names the v1 field each
-// one carries). Two are read differently, as the summary has no field of v1's
-// name for them:
+// one carries). Two of v1's fields have none of that name:
 //   - v1's `engineer_shutdown` is SessionEnded's reason
 //     END_REASON_ENGINEER_STOPPED: ecu publishes session.ended once, at the
 //     session's real end, so the card holds nothing back (#66 R3);
-//   - v1's `type`, the label of a session whose kind is unknown, is the
-//     summary's session_type.
+//   - v1's `type`, its first-frame guess of race, time trial or practice, has
+//     no v2 field (the summary's session_type is ecu's final kind), so a
+//     session whose kind ecu could not tell is a "session", where v1 could say
+//     "race" or "time trial".
 package card
 
 import (
@@ -90,7 +91,7 @@ func Build(ended *eventsv1.SessionEnded, pitwallURL string) (Card, bool) {
 	cars := int(s.GetTotalCars())
 	finished := s.GetFinished()
 
-	title := TrackLabel(s.GetTrack()) + " · " + KindLabel(sessionType, totalLaps, s.GetSessionType())
+	title := TrackLabel(s.GetTrack()) + " · " + KindLabel(sessionType, totalLaps)
 
 	ofCars := ""
 	if cars > 0 {
@@ -278,9 +279,8 @@ func TrackLabel(t *eventsv1.TrackVerdict) string {
 
 // KindLabel is the card's kind of session, from ecu's verdict on it (kind) and
 // the laps the race runs: "6-lap race", "timed race", "time trial", "3-lap run".
-// A kind ecu could not tell takes the summary's session type (summaryType), as
-// v1 took its `type`, else "session".
-func KindLabel(kind eventsv1.SessionType, totalLaps int, summaryType eventsv1.SessionType) string {
+// A kind ecu could not tell is "session" (the package doc says why).
+func KindLabel(kind eventsv1.SessionType, totalLaps int) string {
 	switch kind {
 	case eventsv1.SessionType_SESSION_TYPE_LAP_RACE:
 		return fmt.Sprintf("%d-lap race", totalLaps)
@@ -290,14 +290,6 @@ func KindLabel(kind eventsv1.SessionType, totalLaps int, summaryType eventsv1.Se
 		return "time trial"
 	case eventsv1.SessionType_SESSION_TYPE_SOLO_LAPS:
 		return fmt.Sprintf("%d-lap run", totalLaps)
-	}
-	switch summaryType {
-	case eventsv1.SessionType_SESSION_TYPE_RACE:
-		return "race"
-	case eventsv1.SessionType_SESSION_TYPE_TIME_TRIAL:
-		return "time trial"
-	case eventsv1.SessionType_SESSION_TYPE_PRACTICE:
-		return "practice"
 	}
 	return "session"
 }

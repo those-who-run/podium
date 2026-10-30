@@ -1,10 +1,12 @@
 package discord
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -99,10 +101,7 @@ func TestOtherFailures(t *testing.T) {
 	if _, err := (&Poster{Token: "tok"}).Send(t.Context(), testCard); err == nil {
 		t.Error("no channel: no error")
 	}
-	srv, _, _ := fake(t, http.StatusOK, `not json`)
-	if _, err := (&Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}).Send(t.Context(), testCard); err == nil {
-		t.Error("an unreadable answer: no error")
-	}
+	srv, _, _ := fake(t, http.StatusOK, `{"id": "1"}`)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err := (&Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}).Send(ctx, testCard); err == nil {
@@ -110,5 +109,59 @@ func TestOtherFailures(t *testing.T) {
 	}
 	if _, err := (&Poster{BaseURL: "http://\x7f", Token: "tok", ChannelID: "42"}).Send(t.Context(), testCard); err == nil {
 		t.Error("a bad URL: no error")
+	}
+}
+
+// A 2xx is a message posted, whatever its body: reporting a failure would have
+// paddock#67's retry post the card twice. The id is then empty, and podium warns
+// without the body or the token.
+func TestASentMessageWithAnUnreadableAnswerIsPosted(t *testing.T) {
+	for _, body := range []string{`not json {"secret"}`, `{}`, `{"id": 7}`} {
+		srv, reqs, _ := fake(t, http.StatusOK, body)
+		var log bytes.Buffer
+		p := &Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42", Logger: slog.New(slog.NewJSONHandler(&log, nil))}
+		id, err := p.Send(t.Context(), testCard)
+		if err != nil || id != "" || len(*reqs) != 1 {
+			t.Errorf("%s: %q, %v after %d requests; want no id, no error, one request", body, id, err, len(*reqs))
+		}
+		if !strings.Contains(log.String(), `"level":"WARN"`) || strings.Contains(log.String(), "secret") ||
+			strings.Contains(log.String(), "tok") {
+			t.Errorf("%s: log %s", body, log.String())
+		}
+	}
+}
+
+// A 429 carries the wait Discord asks for, from its header or its body.
+func TestARateLimitCarriesItsWait(t *testing.T) {
+	for _, tc := range []struct {
+		header, body string
+		want         time.Duration
+	}{
+		{"2", `{"retry_after": 9.5}`, 2 * time.Second},
+		{"", `{"message": "You are being rate limited.", "retry_after": 0.64, "global": false}`, 640 * time.Millisecond},
+		{"soon", `{"retry_after": 1.5}`, 1500 * time.Millisecond},
+		{"", `not json`, 0},
+		{"-1", `{}`, 0},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if tc.header != "" {
+				w.Header().Set("Retry-After", tc.header)
+			}
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, tc.body)
+		}))
+		_, err := (&Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}).Send(t.Context(), testCard)
+		srv.Close()
+		var se *StatusError
+		if !errors.As(err, &se) || se.RetryAfter != tc.want || se.Permanent() {
+			t.Errorf("%q, %s: %v (wait %v), want a retryable StatusError waiting %v", tc.header, tc.body, err, se, tc.want)
+		}
+	}
+	// Only a 429's wait is read.
+	srv, _, _ := fake(t, http.StatusInternalServerError, `{"retry_after": 3}`)
+	_, err := (&Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}).Send(t.Context(), testCard)
+	var se *StatusError
+	if !errors.As(err, &se) || se.RetryAfter != 0 {
+		t.Errorf("a 500: %v", err)
 	}
 }
