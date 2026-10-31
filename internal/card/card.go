@@ -8,7 +8,16 @@
 //
 // Where v1 read summary.json, the card reads SessionEnded's summary, which
 // carries the same fields (contracts' SessionSummary names the v1 field each
-// one carries). Two of v1's fields have none of that name:
+// one carries). One departure is the maintainer's decision (2026-10-30): the
+// best lap is ecu's, the summary's best_lap and best_lap_time_ms, so the card
+// and the pit wall always agree (ecu is the brain), where v1's card worked out
+// its own (results.best_lap). They differ where no lap counts for ecu's best
+// and v1 took one anyway: ecu leaves out pit laps and every lap that doesn't
+// count (contracts' SessionSummary.best_lap), so the first qualifying of
+// real-quali-restart-quit-2026-10-14, whose only timed lap is lap 1, shows no
+// best lap, where v1 showed "8:26.429 (lap 1)".
+//
+// Two of v1's fields have none of that name:
 //   - v1's `engineer_shutdown` is SessionEnded's reason
 //     END_REASON_ENGINEER_STOPPED: ecu publishes session.ended once, at the
 //     session's real end, so the card holds nothing back (#66 R3);
@@ -124,9 +133,10 @@ func Build(ended *eventsv1.SessionEnded, pitwallURL string) (Card, bool) {
 	}
 
 	var fields []Field
-	if lap, best, ok := BestLap(s.GetLaps(), sessionType == eventsv1.SessionType_SESSION_TYPE_LAP_RACE,
-		int(s.GetGameBestLapMs())); ok {
-		fields = append(fields, Field{"Best lap", fmt.Sprintf("%s (lap %d)", format.RaceTime(best), lap)})
+	// ecu's best lap, which the pit wall shows too; none when ecu decided none.
+	if s.BestLap != nil && s.GetBestLapTimeMs() > 0 {
+		fields = append(fields, Field{"Best lap",
+			fmt.Sprintf("%s (lap %d)", format.RaceTime(int(s.GetBestLapTimeMs())), s.GetBestLap())})
 	}
 	if car := s.GetCarName(); car != "" {
 		fields = append(fields, Field{"Car", car})
@@ -225,43 +235,6 @@ func withPosition(result string, position int) string {
 // the engineer says it.
 func PositionShown(kind *eventsv1.SessionKind) bool {
 	return kind.GetField() && kind.GetCarsOnTrack()
-}
-
-// BestLap is the lap number and time of the session's quickest lap, and false
-// when it has none. GT7's own best (gameBest, 0 for none) wins when a lap has its
-// time: it leaves out a start lap from a grid ahead of the line. Without it, the
-// quickest complete lap, skipping lap 1 of a lap race (skipLap1) when another lap
-// is timed, as the spoken summary does.
-//
-// It is v1's results.best_lap, which the card used, not the summary's best_lap:
-// ecu's best leaves out pit laps and laps that don't count, where v1's card did
-// not (contracts' SessionSummary.best_lap), and the card is v1's.
-func BestLap(laps []*eventsv1.LapCompleted, skipLap1 bool, gameBest int) (lap, ms int, ok bool) {
-	if gameBest > 0 {
-		for _, l := range laps {
-			if int(l.GetLapTimeMs()) == gameBest {
-				return int(l.GetLap()), gameBest, true
-			}
-		}
-	}
-	type timed struct{ lap, ms int }
-	var all []timed
-	others := false
-	for _, l := range laps {
-		if l.GetComplete() && l.GetLapTimeMs() > 0 {
-			all = append(all, timed{int(l.GetLap()), int(l.GetLapTimeMs())})
-			others = others || l.GetLap() != 1
-		}
-	}
-	for _, t := range all {
-		if skipLap1 && others && t.lap == 1 {
-			continue
-		}
-		if !ok || t.ms < ms {
-			lap, ms, ok = t.lap, t.ms, true
-		}
-	}
-	return lap, ms, ok
 }
 
 // TrackLabel is the card's track: the layout's name when ecu is sure of it

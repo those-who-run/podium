@@ -33,7 +33,7 @@ func solo() *eventsv1.SessionEnded {
 		Reason:    eventsv1.EndReason_END_REASON_FINISHED,
 		Summary: &eventsv1.SessionSummary{
 			LapsCompleted: 3, Finished: true, TotalTimeMs: i32(300000),
-			Laps: laps(100000, 100000, 100000),
+			Laps: laps(100000, 100000, 100000), BestLap: i32(1), BestLapTimeMs: i32(100000),
 			Kind: &eventsv1.SessionKind{SessionType: eventsv1.SessionType_SESSION_TYPE_SOLO_TIMED},
 		},
 	}
@@ -46,7 +46,7 @@ func race() *eventsv1.SessionEnded {
 		Reason:    eventsv1.EndReason_END_REASON_QUIT,
 		Summary: &eventsv1.SessionSummary{
 			LapsCompleted: 2, TotalLaps: i32(5), FinalPosition: i32(3), TotalCars: i32(20),
-			Laps: laps(101000, 99000, 0),
+			Laps: laps(101000, 99000, 0), BestLap: i32(2), BestLapTimeMs: i32(99000),
 			Kind: &eventsv1.SessionKind{
 				SessionType: eventsv1.SessionType_SESSION_TYPE_LAP_RACE, TotalLaps: i32(5),
 				Field: true, CarsOnTrack: true, FuelUse: eventsv1.FuelUse_FUEL_USE_ON,
@@ -197,30 +197,24 @@ func TestFuelUsedOnlyWithFuelUseOn(t *testing.T) {
 	}
 }
 
-func TestBestLap(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		laps     []*eventsv1.LapCompleted
-		skip     bool
-		gameBest int
-		lap, ms  int
-		ok       bool
-	}{
-		{"the quickest", laps(101000, 99000, 100000), false, 0, 2, 99000, true},
-		{"lap 1 counts outside a lap race", laps(90000, 99000), false, 0, 1, 90000, true},
-		{"lap 1 of a lap race is skipped", laps(90000, 99000), true, 0, 2, 99000, true},
-		{"unless it is the only one timed", laps(90000, 0), true, 0, 1, 90000, true},
-		{"GT7's best wins", laps(90000, 99000, 98000), false, 99000, 2, 99000, true},
-		{"GT7's best on no lap seen", laps(90000, 99000), false, 95000, 1, 90000, true},
-		{"none timed", laps(0, 0), false, 0, 0, 0, false},
-		{"no laps", nil, true, 0, 0, 0, false},
+func TestTheBestLapIsEcus(t *testing.T) {
+	e := race()
+	e.Summary.BestLap, e.Summary.BestLapTimeMs = i32(1), i32(101000) // not the quickest: ecu decides
+	if !hasField(build(t, e), "Best lap", "1:41.000 (lap 1)") {
+		t.Errorf("fields %v, want ecu's best lap", build(t, e).Fields)
+	}
+	for _, edit := range []func(s *eventsv1.SessionSummary){
+		func(s *eventsv1.SessionSummary) { s.BestLap, s.BestLapTimeMs = nil, nil },
+		func(s *eventsv1.SessionSummary) { s.BestLapTimeMs = nil },
+		func(s *eventsv1.SessionSummary) { s.BestLap = nil },
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			lap, ms, ok := BestLap(tc.laps, tc.skip, tc.gameBest)
-			if lap != tc.lap || ms != tc.ms || ok != tc.ok {
-				t.Errorf("(%d, %d, %v), want (%d, %d, %v)", lap, ms, ok, tc.lap, tc.ms, tc.ok)
+		e := race()
+		edit(e.Summary)
+		for _, f := range build(t, e).Fields {
+			if f.Name == "Best lap" {
+				t.Errorf("a best lap %q where ecu has none", f.Value)
 			}
-		})
+		}
 	}
 }
 

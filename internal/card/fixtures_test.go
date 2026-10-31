@@ -80,6 +80,21 @@ func endedOf(t *testing.T, name string) []*eventsv1.SessionEnded {
 // v2's are ULIDs, so the link is compared with the session's own id in it.
 var v1Link = regexp.MustCompile(`(?m)^(http://pitwall\.test/\?session=)\S+$`)
 
+// accepted are the known differences from v1's cards, each with its reason and
+// the decision behind it. v1's files stay as v1 made them; the line named here is
+// taken out of v1's card before the comparison, and the test fails if v1's card
+// no longer has it or v2's card has it too, so an entry never outlives its
+// difference.
+var accepted = map[string]map[int]struct{ line, why string }{
+	"real-quali-restart-quit-2026-10-14": {
+		1: {
+			line: "  Best lap: 8:26.429 (lap 1)\n",
+			why: "the card shows ecu's best lap (the maintainer's decision, 2026-10-30): ecu leaves out laps " +
+				"that don't count for best, here lap 1, the only one timed, so the session has none",
+		},
+	},
+}
+
 // sameAsV1 checks each session's card against v1's, field for field: the
 // title, the link (with v2's session id), the result, the fields in order,
 // the colour, the footer and the timestamp (to the millisecond: v1 stored
@@ -106,6 +121,13 @@ func sameAsV1(t *testing.T, name string) []Card {
 		}
 		cards = append(cards, got)
 		wantText := v1Link.ReplaceAllString(w.text, "${1}"+e.GetSessionId())
+		if diff, ok := accepted[name][i+1]; ok {
+			if !strings.Contains(wantText, diff.line) || strings.Contains(got.Text(), diff.line) {
+				t.Errorf("%s session %d: the accepted difference %q (%s) is gone: remove it",
+					name, i+1, diff.line, diff.why)
+			}
+			wantText = strings.Replace(wantText, diff.line, "", 1)
+		}
 		if got.Text() != wantText {
 			t.Errorf("%s session %d:\n got: %s\nwant: %s", name, i+1, got.Text(), wantText)
 		}
@@ -119,7 +141,8 @@ func sameAsV1(t *testing.T, name string) []Card {
 }
 
 // AC1: the finished race, the two stints, the time trial with the pit wall
-// link, the timed finish and the restart then quit give v1's cards.
+// link, the timed finish and the restart then quit give v1's cards, but for the
+// accepted differences.
 func TestTheCardsAreV1s(t *testing.T) {
 	for _, name := range []string{
 		"real-nuc-suzuka-no-stop-2026-10-15",
