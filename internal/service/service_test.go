@@ -89,16 +89,47 @@ func TestConfigFromEnv(t *testing.T) {
 		vars map[string]string
 		want Config
 	}{
-		{"defaults", nil, Config{Addr: ":8080", LogLevel: slog.LevelInfo}},
+		{"defaults", nil, Config{Addr: ":8080", LogLevel: slog.LevelInfo, Sink: "discord", Src: "live"}},
 		{"set", map[string]string{"ADDR": "127.0.0.1:9000", "LOG_LEVEL": "debug"},
-			Config{Addr: "127.0.0.1:9000", LogLevel: slog.LevelDebug}},
+			Config{Addr: "127.0.0.1:9000", LogLevel: slog.LevelDebug, Sink: "discord", Src: "live"}},
 		{"upper case level", map[string]string{"LOG_LEVEL": "WARN"},
-			Config{Addr: ":8080", LogLevel: slog.LevelWarn}},
+			Config{Addr: ":8080", LogLevel: slog.LevelWarn, Sink: "discord", Src: "live"}},
+		// paddock#67: a results channel turns cards on.
+		{"discord", map[string]string{
+			"TWR_DISCORD_RESULTS_CHANNEL_ID": "123", "TWR_DISCORD_BOT_TOKEN": "t", "TWR_NATS_URL": "nats://n:4222",
+			"TWR_PITWALL_URL": "http://pitwall",
+		}, Config{
+			Addr: ":8080", LogLevel: slog.LevelInfo, Cards: true, Sink: "discord", Src: "live",
+			NATSURL: "nats://n:4222", ChannelID: "123", Token: "t", Pitwall: "http://pitwall",
+		}},
+		// R7: no channel, no cards, and nothing else needed.
+		{"discord without a channel", map[string]string{"TWR_DISCORD_BOT_TOKEN": "t"},
+			Config{Addr: ":8080", LogLevel: slog.LevelInfo, Sink: "discord", Src: "live", Token: "t"}},
+		{"console", map[string]string{"TWR_PODIUM_SINK": "console", "TWR_PODIUM_SRC": "replay-x", "TWR_NATS_URL": "nats://n:4222"},
+			Config{Addr: ":8080", LogLevel: slog.LevelInfo, Cards: true, Sink: "console", Src: "replay-x", NATSURL: "nats://n:4222"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got, err := ConfigFromEnv(env(c.vars))
 			if err != nil || got != c.want {
 				t.Errorf("ConfigFromEnv = %+v, %v; want %+v, nil", got, err, c.want)
+			}
+		})
+	}
+}
+
+func TestConfigFromEnvRefusesWhatCardsCannotRunWith(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		vars map[string]string
+		want string
+	}{
+		{"a channel and no token", map[string]string{"TWR_DISCORD_RESULTS_CHANNEL_ID": "1", "TWR_NATS_URL": "nats://n"}, "TWR_DISCORD_BOT_TOKEN"},
+		{"cards and no NATS", map[string]string{"TWR_PODIUM_SINK": "console"}, "TWR_NATS_URL"},
+		{"an unknown sink", map[string]string{"TWR_PODIUM_SINK": "wav"}, "TWR_PODIUM_SINK"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := ConfigFromEnv(env(c.vars)); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("ConfigFromEnv = %v, want an error naming %s", err, c.want)
 			}
 		})
 	}
@@ -132,7 +163,7 @@ func TestNewLoggerWritesJSONFromItsLevel(t *testing.T) {
 
 func TestHealthz(t *testing.T) {
 	rec := httptest.NewRecorder()
-	Handler("1.2.3").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	Handler("1.2.3", nil).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -151,7 +182,7 @@ func TestHealthz(t *testing.T) {
 
 func TestHealthzIsGetOnly(t *testing.T) {
 	rec := httptest.NewRecorder()
-	Handler("1.2.3").ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/healthz", nil))
+	Handler("1.2.3", nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/healthz", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST /healthz status = %d, want 405", rec.Code)
 	}
@@ -165,7 +196,7 @@ func TestRunServesUntilCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	var logs bytes.Buffer
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, ln, NewLogger(&logs, slog.LevelInfo), "test") }()
+	go func() { done <- serve(ctx, ln, NewLogger(&logs, slog.LevelInfo), "test", nil) }()
 
 	if code := get(t, "http://"+ln.Addr().String()+"/healthz"); code != http.StatusOK {
 		t.Errorf("GET /healthz status = %d", code)
@@ -256,7 +287,7 @@ func TestServeReportsAListenerThatFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = ln.Close() // Serve fails at once on a closed listener
-	err = serve(t.Context(), ln, NewLogger(io.Discard, slog.LevelInfo), "test")
+	err = serve(t.Context(), ln, NewLogger(io.Discard, slog.LevelInfo), "test", nil)
 	if err == nil || errors.Is(err, http.ErrServerClosed) {
 		t.Errorf("serve on a closed listener = %v, want an error", err)
 	}
@@ -359,5 +390,42 @@ func TestShutdownWaitsForServeToReturn(t *testing.T) {
 	}
 	if err := <-done; !errors.Is(err, failed) {
 		t.Errorf("shutdown = %v, want the serve error %q", err, failed)
+	}
+}
+
+// paddock#67, R5: GET /metrics is gt7_results_posts_total, each result at 0
+// before the first card.
+func TestMetrics(t *testing.T) {
+	rec := httptest.NewRecorder()
+	Handler("1.2.3", nil).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	for _, want := range []string{
+		"# TYPE gt7_results_posts_total counter",
+		`gt7_results_posts_total{result="ok"} 0`,
+		`gt7_results_posts_total{result="failed"} 0`,
+		`gt7_results_posts_total{result="skipped"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics has no %q:\n%s", want, body)
+		}
+	}
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") {
+		t.Errorf("/metrics is %d %s", rec.Code, rec.Header().Get("Content-Type"))
+	}
+}
+
+// With cards on, a NATS server that can't be reached stops the service rather
+// than leaving it serving with no cards.
+func TestRunWithCardsReportsANATSItCannotReach(t *testing.T) {
+	gone, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := "nats://" + gone.Addr().String()
+	_ = gone.Close()
+	cfg := Config{Addr: "127.0.0.1:0", Cards: true, Sink: SinkConsole, Src: "live", NATSURL: url}
+	err = Run(t.Context(), cfg, NewLogger(io.Discard, slog.LevelInfo), "test")
+	if err == nil || !strings.Contains(err.Error(), "nats") {
+		t.Errorf("Run = %v, want the NATS error", err)
 	}
 }

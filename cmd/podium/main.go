@@ -1,10 +1,10 @@
 // Command podium posts the results cards of Those Who Run v2 (paddock ADR 0010).
-// `podium card FILE` prints the card of each session.ended in FILE and posts
-// nothing, as v1's `post --dry-run` did (paddock#66). With no command it runs the
-// service: it reads its configuration from the environment, logs JSON to standard
-// output and serves GET /healthz until it gets SIGINT or SIGTERM; posting each
-// session's card from the bus arrives with paddock#67. `podium -version` prints
-// its version and exits.
+// `podium card FILE` (or `--sid SID`, from the EVENTS stream) prints the card of
+// each session.ended and posts nothing, as v1's `post --dry-run` did
+// (paddock#66). With no command it runs the service: it reads its configuration
+// from the environment, logs JSON to standard output, serves GET /healthz and
+// GET /metrics, and posts each session's card once (paddock#67), until it gets
+// SIGINT or SIGTERM. `podium -version` prints its version and exits.
 package main
 
 import (

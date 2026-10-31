@@ -1,0 +1,19 @@
+{
+  "$comment": [
+    "cards: podium's record of each session's results card, so a session.ended delivered again posts nothing (paddock#67). One key per session, <src>.<sid>, written only by podium: posting (create-only) before it sends, posted (with a revision check) once Discord has the card. The keys and the value, CardRecord, are contracts' (subjects.yaml).",
+    "This file is not a stream config: bootstrap.sh turns each field into the flag of the same name for nats kv add and nats kv edit.",
+    "history 1: podium reads only the current value; the revision check on the posted write needs no history.",
+    "max_value_size 64 KiB (65536): a value is a CardRecord as protobuf JSON, about 200 bytes. 64 KiB still refuses a mistaken write of something session-sized.",
+    "max_bucket_size 64 MiB (67108864): a key per session that gets a card, a few hundred bytes each, so years of racing and replays fill a few MB. The limit is a backstop so the bucket cannot fill the disk.",
+    "No ttl: a key must outlive the session.ended it answers, which EVENTS keeps 30 days, and a key gone early would let a replayed session.ended post its card again.",
+    "Discard and duplicate window are not set here: nats kv add fixes them for every bucket (discard new, so a full bucket refuses a write, and podium posts nothing it cannot record).",
+    "replicas 1: one NATS server (ADR 0004). File storage, since the bucket exists to outlive a restart."
+  ],
+  "bucket": "cards",
+  "description": "podium's record of each session's results card (paddock#67).",
+  "history": 1,
+  "storage": "file",
+  "replicas": 1,
+  "max_value_size": 65536,
+  "max_bucket_size": 67108864
+}
