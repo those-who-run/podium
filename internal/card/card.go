@@ -2,9 +2,9 @@
 // (paddock#66): v1 1.0.0's results.build_card, field for field, so a card reads
 // as the season of cards v1 posted before it. Build is pure: no I/O, no clock.
 //
-// Times and fuel figures are written by contracts' format package, which the
-// pit wall shares, so the card and the page never show the same lap
-// differently (paddock#128).
+// Its title and result, and the times and fuel figures, are written by
+// contracts' format package, which the pit wall shares, so the card and the
+// page never show the same session or lap differently (paddock#128).
 //
 // Where v1 read summary.json, the card reads SessionEnded's summary, which
 // carries the same fields (contracts' SessionSummary names the v1 field each
@@ -45,8 +45,9 @@ const (
 	AdvanRed = 0xD21F1B
 	// CarbonGrey is every other session's colour: v1's brand.CARBON_GREY.
 	CarbonGrey = 0x333333
-	// GlyphFlag comes before a finished result: v1's brand.GLYPH_FLAG.
-	GlyphFlag = "🚩"
+	// GlyphFlag comes before a finished result: v1's brand.GLYPH_FLAG, as
+	// contracts' format writes it.
+	GlyphFlag = format.GlyphFlag
 	// Name and Kanji are the footer: v1's brand.NAME and brand.KANJI.
 	Name  = "Those Who Run"
 	Kanji = "走り屋"
@@ -88,50 +89,7 @@ func Build(ended *eventsv1.SessionEnded, pitwallURL string) (Card, bool) {
 		return Card{}, false
 	}
 	kind := s.GetKind()
-	sessionType := eventsv1.SessionType_SESSION_TYPE_UNKNOWN
-	if kind != nil {
-		sessionType = kind.GetSessionType()
-	}
-	totalLaps := int(s.GetTotalLaps())
-	position := 0
-	if PositionShown(kind) {
-		position = int(s.GetFinalPosition())
-	}
-	cars := int(s.GetTotalCars())
 	finished := s.GetFinished()
-
-	title := TrackLabel(s.GetTrack()) + " · " + KindLabel(sessionType, totalLaps)
-
-	ofCars := ""
-	if cars > 0 {
-		ofCars = " of " + strconv.Itoa(cars)
-	}
-	var result string
-	switch {
-	case finished:
-		result = "Finished"
-		if position > 0 {
-			result = fmt.Sprintf("Finished P%d%s", position, ofCars)
-		}
-		if total := int(s.GetTotalTimeMs()); total > 0 {
-			result += " in " + format.RaceTime(total)
-		}
-	case s.GetEndedPaused():
-		result = PausedResult(s, position)
-	case ended.GetReason() == eventsv1.EndReason_END_REASON_ENGINEER_STOPPED:
-		result = StoppedResult(s, position)
-	case sessionType == eventsv1.SessionType_SESSION_TYPE_LAP_RACE && totalLaps > 0:
-		result = fmt.Sprintf("Retired on lap %d of %d", min(laps+1, totalLaps), totalLaps)
-		if position > 0 {
-			result += fmt.Sprintf(", running P%d", position)
-		}
-	default:
-		result = plural(laps, "lap")
-		if position > 0 {
-			result += fmt.Sprintf(", P%d%s", position, ofCars)
-		}
-	}
-
 	var fields []Field
 	// ecu's best lap, which the pit wall shows too; none when ecu decided none.
 	if s.BestLap != nil && s.GetBestLapTimeMs() > 0 {
@@ -174,101 +132,20 @@ func Build(ended *eventsv1.SessionEnded, pitwallURL string) (Card, bool) {
 	}
 
 	c := Card{
-		Title:       title,
-		Description: result,
+		Title:       format.Title(s),
+		Description: format.Result(s, ended.GetReason(), true, 0),
 		Fields:      fields,
 		Colour:      CarbonGrey,
 		Footer:      Name + " " + Kanji,
 		URL:         SessionLink(pitwallURL, ended.GetSessionId()),
 	}
 	if finished {
-		c.Description = GlyphFlag + " " + result
 		c.Colour = AdvanRed
 	}
 	if at := s.GetStartedAt(); at != nil && at.AsTime().Unix() != 0 {
 		c.Timestamp = at.AsTime().UTC()
 	}
 	return c, true
-}
-
-// PausedResult is the result of a session that ended in a pause: "Paused on lap
-// 1, P2", "Paused on lap 3 of 5". It is not a retirement: the race may still be
-// paused on the PS5. position 0 is none shown.
-func PausedResult(s *eventsv1.SessionSummary, position int) string {
-	laps, total := int(s.GetLapsCompleted()), int(s.GetTotalLaps())
-	lap := laps + 1
-	result := ""
-	if total > 0 {
-		result = fmt.Sprintf("Paused on lap %d of %d", min(lap, total), total)
-	} else {
-		result = fmt.Sprintf("Paused on lap %d", lap)
-	}
-	return withPosition(result, position)
-}
-
-// StoppedResult is the result of a session ecu's stop ended and no restart
-// continued: "Engineer stopped on lap 7, P1". It is not a retirement: the race
-// went on. The lap is the last one seen. position 0 is none shown.
-func StoppedResult(s *eventsv1.SessionSummary, position int) string {
-	lap := int(s.GetLapsCompleted()) + 1
-	if len(s.GetLaps()) > 0 {
-		lap = 0
-		for _, l := range s.GetLaps() {
-			lap = max(lap, int(l.GetLap()))
-		}
-	}
-	result := fmt.Sprintf("Engineer stopped on lap %d", lap)
-	if total := int(s.GetTotalLaps()); total > 0 {
-		result += fmt.Sprintf(" of %d", total)
-	}
-	return withPosition(result, position)
-}
-
-func withPosition(result string, position int) string {
-	if position > 0 {
-		return fmt.Sprintf("%s, P%d", result, position)
-	}
-	return result
-}
-
-// PositionShown says whether a position means anything: a field GT7 flags, as
-// the engineer says it.
-func PositionShown(kind *eventsv1.SessionKind) bool {
-	return kind.GetField() && kind.GetCarsOnTrack()
-}
-
-// TrackLabel is the card's track: the layout's name when ecu is sure of it
-// (probable or confirmed), else the circuit's, else "Unknown track".
-func TrackLabel(t *eventsv1.TrackVerdict) string {
-	switch c := t.GetConfidence(); {
-	case (c == eventsv1.TrackConfidence_TRACK_CONFIDENCE_PROBABLE ||
-		c == eventsv1.TrackConfidence_TRACK_CONFIDENCE_CONFIRMED) && t.GetName() != "":
-		return t.GetName()
-	case t.GetFamily() != "":
-		return t.GetFamily()
-	}
-	return "Unknown track"
-}
-
-// KindLabel is the card's kind of session, from ecu's verdict on it (kind) and
-// the laps the race runs: "6-lap race", "timed race", "time trial", "3-lap run",
-// and "qualifying or practice" for a session ranked by lap time with a field
-// (contracts v0.2.7's SESSION_TYPE_RANKED; telemetry can't tell the two apart).
-// A kind ecu could not tell is "session" (the package doc says why).
-func KindLabel(kind eventsv1.SessionType, totalLaps int) string {
-	switch kind {
-	case eventsv1.SessionType_SESSION_TYPE_LAP_RACE:
-		return fmt.Sprintf("%d-lap race", totalLaps)
-	case eventsv1.SessionType_SESSION_TYPE_TIMED_FIELD:
-		return "timed race"
-	case eventsv1.SessionType_SESSION_TYPE_RANKED:
-		return "qualifying or practice"
-	case eventsv1.SessionType_SESSION_TYPE_SOLO_TIMED:
-		return "time trial"
-	case eventsv1.SessionType_SESSION_TYPE_SOLO_LAPS:
-		return fmt.Sprintf("%d-lap run", totalLaps)
-	}
-	return "session"
 }
 
 // SessionLink is a session's page on the pit wall, "<base>/?session=<sid>", or
@@ -296,13 +173,6 @@ func quote(s string) string {
 		b.WriteByte(hex[c&15])
 	}
 	return b.String()
-}
-
-func plural(n int, word string) string {
-	if n == 1 {
-		return fmt.Sprintf("%d %s", n, word)
-	}
-	return fmt.Sprintf("%d %ss", n, word)
 }
 
 // Text is the card as v1's `those-who-run post --dry-run` printed it: the

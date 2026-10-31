@@ -230,7 +230,7 @@ func TestTrackNameNeedsConfidenceOrAFamily(t *testing.T) {
 		unsure: "Unknown track", family: "Fuji International Speedway", probable: "Fuji",
 		nameless: "Unknown track", nil: "Unknown track",
 	} {
-		if got := TrackLabel(track); got != want {
+		if got := format.TrackLabel(track); got != want {
 			t.Errorf("%v: %q, want %q", track, got, want)
 		}
 	}
@@ -250,7 +250,7 @@ func TestKindLabel(t *testing.T) {
 		{eventsv1.SessionType_SESSION_TYPE_UNKNOWN, 0, "session"},
 		{eventsv1.SessionType_SESSION_TYPE_UNSPECIFIED, 0, "session"},
 	} {
-		if got := KindLabel(tc.kind, tc.laps); got != tc.want {
+		if got := format.KindLabel(tc.kind, tc.laps); got != tc.want {
 			t.Errorf("%v: %q, want %q", tc.kind, got, tc.want)
 		}
 	}
