@@ -1,0 +1,14 @@
+Nurburgring 24h · timed race
+http://pitwall.test/?session=20260101-000033
+1 lap, P1 of 20
+  Best lap: 8:26.429 (lap 1)
+  Car: Hyundai Genesis Gr.3
+  Fuel used: 25%
+-- colour=0x333333 footer=Those Who Run 走り屋 timestamp=1767225633.171634
+
+Nurburgring 24h · timed race
+http://pitwall.test/?session=20260101-001035
+2 laps, P1 of 20
+  Best lap: 8:20.204 (lap 2)
+  Car: Hyundai Genesis Gr.3
+-- colour=0x333333 footer=Those Who Run 走り屋 timestamp=1767226235.90504

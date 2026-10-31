@@ -1,6 +1,10 @@
-// Command podium runs the template's example service: it reads its configuration
-// from the environment, logs JSON to standard output and serves GET /healthz until
-// it gets SIGINT or SIGTERM. `podium -version` prints its version and exits.
+// Command podium posts the results cards of Those Who Run v2 (paddock ADR 0010).
+// `podium card FILE` prints the card of each session.ended in FILE and posts
+// nothing, as v1's `post --dry-run` did (paddock#66). With no command it runs the
+// service: it reads its configuration from the environment, logs JSON to standard
+// output and serves GET /healthz until it gets SIGINT or SIGTERM; posting each
+// session's card from the bus arrives with paddock#67. `podium -version` prints
+// its version and exits.
 package main
 
 import (
@@ -24,6 +28,9 @@ import (
 // reports its version; a pull request's image build passes none, and reports "dev".
 var version = "dev"
 
+// stdin is what `podium card -` reads: a var, so the tests can set it.
+var stdin io.Reader = os.Stdin
+
 func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
 }
@@ -35,6 +42,9 @@ func main() {
 func run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if len(args) > 0 && args[0] == "card" {
+		return cardCommand(ctx, args[1:], getenv, stdin, stdout, stderr)
+	}
 	flags := flag.NewFlagSet("podium", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	showVersion := flags.Bool("version", false, "print the version and exit")

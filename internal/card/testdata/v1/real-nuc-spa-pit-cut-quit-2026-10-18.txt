@@ -1,0 +1,7 @@
+Circuit de Spa-Francorchamps · timed race
+http://pitwall.test/?session=20260101-000029
+4 laps, P4 of 18
+  Best lap: 2:09.918 (lap 3)
+  Car: Porsche 962 C '88
+  Fuel used: 21%
+-- colour=0x333333 footer=Those Who Run 走り屋 timestamp=1767225629.748992

@@ -1,0 +1,17 @@
+Sportsland SUGO · 2-lap race
+http://pitwall.test/?session=20260101-000016
+Retired on lap 2 of 2, running P20
+  Best lap: 1:49.315 (lap 1)
+  Car: Mazda RX-VISION GT3 EVO '26
+  Fuel used: 25%
+-- colour=0x333333 footer=Those Who Run 走り屋 timestamp=1767225616.352406
+
+no full lap: nothing to post
+
+Sportsland SUGO · 2-lap race
+http://pitwall.test/?session=20260101-000542
+🚩 Finished P2 of 20 in 2:49.772
+  Best lap: 1:23.610 (lap 2)
+  Car: Mazda RX-VISION GT3 EVO '26
+  Fuel used: 35%
+-- colour=0xD21F1B footer=Those Who Run 走り屋 timestamp=1767225942.078748

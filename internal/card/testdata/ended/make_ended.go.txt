@@ -1,0 +1,56 @@
+// make_ended: how testdata/ended/*.jsonl were made (paddock#66). Each line is a
+// session.ended ecu published for the recording, in protobuf's JSON form, in
+// order. Made once from ecu at tag v0.1.11 (the live release) by dropping this
+// file into ecu's internal/race as zz_podium_gen_test.go, which replays the
+// recordings in process with the race machine's own test helpers (no NATS, the
+// frames dated from 2026-01-01T00:00:00Z as v1's replay --clock does):
+//
+//	PODIUM_OUT=DIR go test ./internal/race/ -run TestZZPodiumGen -count=1
+//
+// restart-pair.jsonl is ecu's restart pair (internal/race/continue_test.go):
+// real-nuc-suzuka-before-restart-2026-10-18 to a graceful stop, then a new
+// machine continuing the session from the record it left, through
+// real-nuc-suzuka-joined-mid-race-2026-10-18, 8.7 s later.
+
+package race
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/those-who-run/contracts/ce"
+)
+
+func TestZZPodiumGen(t *testing.T) {
+	dir := os.Getenv("PODIUM_OUT")
+	if dir == "" {
+		t.Skip()
+	}
+	write := func(name string, outs []Output) {
+		var buf []byte
+		for _, o := range outs {
+			if o.Ended == nil {
+				continue
+			}
+			b, err := ce.Marshal(o.Ended)
+			if err != nil {
+				t.Fatal(err)
+			}
+			buf = append(append(buf, b...), '\n')
+		}
+		if err := os.WriteFile(filepath.Join(dir, name+".jsonl"), buf, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{
+		"real-nuc-suzuka-no-stop-2026-10-15", "real-nuc-suzuka-pit-stop-2026-10-15",
+		"real-nuc-fuji-timed-2026-10-15", "real-nuc-suzuka-timed-race-2026-10-16",
+		"real-quali-restart-quit-2026-10-14", "real-nuc-spa-pit-cut-quit-2026-10-18",
+		"real-nuc-sugo-restarts-2026-10-18",
+	} {
+		write(name, replay(t, name))
+	}
+	p := restartPair(t, restartGap, window, 0)
+	write("restart-pair", append(p.first, p.second...))
+}

@@ -1,7 +1,7 @@
-// Package service is the template's example service, kept to the conventions every
-// Go component starts from (README.md, "Conventions"): configuration from the
-// environment, log/slog writing JSON, and a health endpoint. A component replaces
-// what it serves and keeps the shape.
+// Package service is podium's service, kept to the conventions every Go component
+// starts from (README.md, "Conventions"): configuration from the environment,
+// log/slog writing JSON, and a health endpoint. It serves only GET /healthz until
+// it posts the cards from the bus (paddock#67).
 package service
 
 import (

@@ -10,6 +10,34 @@ names its paddock issue: `Closes those-who-run/paddock#N.` when it meets every
 acceptance criterion, `Part of those-who-run/paddock#N` otherwise
 ([`AGENTS.md`](AGENTS.md)).
 
+## The card
+
+A session's card is built from its `session.ended` alone
+([`internal/card`](internal/card/card.go)): v1 1.0.0's results card, field for
+field, with its times and fuel figures written by contracts' `format` package.
+A session with no full lap gets none.
+
+`podium card FILE` prints the card of each `session.ended` in `FILE` (`-` for
+standard input), as v1's `those-who-run post <id> --dry-run` did, and posts
+nothing. `FILE` holds the messages' bodies as the `EVENTS` stream stores them,
+one after another. `--pitwall URL`, by default `TWR_PITWALL_URL`, links each
+card's title to the session on the pit wall: `<URL>/?session=<sid>`.
+
+```console
+$ podium card --pitwall http://pitwall.home.arpa ended.jsonl
+Fuji International Speedway · time trial
+http://pitwall.home.arpa/?session=01KDVDNA000ZB038PDRJACDC76
+2 laps
+  Best lap: 2:00.314 (lap 2)
+  Car: NISMO 400R '95
+```
+
+A card goes to a sink ([`internal/sink`](internal/sink/sink.go)): the console,
+which needs no Discord, or the results channel through Discord's REST API
+([`internal/discord`](internal/discord/discord.go)), with the bot token and no
+gateway session (paddock ADR 0010). Posting each session's card from the bus,
+exactly once, is paddock#67.
+
 ## Checks
 
 `make check` runs what CI runs; [`AGENTS.md`](AGENTS.md) says what that is and
@@ -22,7 +50,7 @@ The ones every Go component shares, from the
 
 - **Configuration from the environment**, read once at start-up into a typed
   struct; an unset variable takes its default and a value that can't be read
-  stops the process. The example reads `ADDR` (`:8080`) and
+  stops the process. The service reads `ADDR` (`:8080`) and
   `LOG_LEVEL` (`info`).
 - **Logging with `log/slog`, as JSON** on standard output, one object per line,
   with key-value pairs.
