@@ -184,25 +184,26 @@ func Start(t testing.TB) (jetstream.JetStream, jetstream.KeyValue) {
 	return withDefs(t, Bare(t))
 }
 
-// FreeURL is the URL of a free port with no server on it yet, for a test of a
-// client that starts before its server: StartAt starts the server there.
-func FreeURL(t testing.TB) string {
-	t.Helper()
-	return "nats://127.0.0.1:" + strconv.Itoa(freePort(t))
+// Later is a server a test starts later, on a port free now, for a client
+// that starts before its server: URL is where the client finds it once Start
+// has started it.
+type Later struct {
+	// URL is the server's address for a client.
+	URL  string
+	port int
 }
 
-// StartAt is Start on the port of url, which FreeURL gave.
-func StartAt(t testing.TB, url string) (jetstream.JetStream, jetstream.KeyValue) {
+// FreeURL is a Later on a free port.
+func FreeURL(t testing.TB) Later {
 	t.Helper()
-	_, port, err := net.SplitHostPort(strings.TrimPrefix(url, "nats://"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	p, err := strconv.Atoi(port)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return withDefs(t, bareOn(t, p))
+	port := freePort(t)
+	return Later{URL: "nats://127.0.0.1:" + strconv.Itoa(port), port: port}
+}
+
+// Start is natstest.Start on l's port.
+func (l Later) Start(t testing.TB) (jetstream.JetStream, jetstream.KeyValue) {
+	t.Helper()
+	return withDefs(t, bareOn(t, l.port))
 }
 
 // withDefs makes EVENTS and the cards bucket on s.

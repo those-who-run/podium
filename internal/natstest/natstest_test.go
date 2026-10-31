@@ -32,6 +32,22 @@ func TestStart(t *testing.T) {
 	}
 }
 
+// A Later starts the server, with EVENTS and the cards bucket, at the URL
+// FreeURL gave before any server was there.
+func TestStartLaterAtAFreeURL(t *testing.T) {
+	later := FreeURL(t)
+	js, kv := later.Start(t)
+	if got := js.Conn().ConnectedUrl(); got != later.URL {
+		t.Errorf("connected to %q, want %q", got, later.URL)
+	}
+	if _, err := js.Stream(t.Context(), "EVENTS"); err != nil {
+		t.Errorf("EVENTS: %v", err)
+	}
+	if kv.Bucket() != "cards" {
+		t.Errorf("bucket %q, want cards", kv.Bucket())
+	}
+}
+
 func TestANamedServerMustBeThePinnedRelease(t *testing.T) {
 	if _, err := findNATSServer(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Error("a binary that isn't there is no error")

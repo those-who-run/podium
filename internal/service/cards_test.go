@@ -41,11 +41,11 @@ func TestRunPostsTheCardsFromTheBus(t *testing.T) {
 // /healthz 503 until the first connection, and posts the card once the server
 // is up, rather than stopping.
 func TestRunWaitsForANATSThatIsNotUpYet(t *testing.T) {
-	url := natstest.FreeURL(t)
+	later := natstest.FreeURL(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	logs := newReadyLog()
-	cfg := Config{Addr: "127.0.0.1:0", Cards: true, Sink: SinkConsole, Src: "replay-svc", NATSURL: url, Pitwall: "http://pw"}
+	cfg := Config{Addr: "127.0.0.1:0", Cards: true, Sink: SinkConsole, Src: "replay-svc", NATSURL: later.URL, Pitwall: "http://pw"}
 	done := make(chan error, 1)
 	go func() { done <- Run(ctx, cfg, NewLogger(logs, slog.LevelInfo), "test") }()
 	waitServing(t, logs, done)
@@ -60,10 +60,26 @@ func TestRunWaitsForANATSThatIsNotUpYet(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 	}
 
-	js, _ := natstest.StartAt(t, url)
+	js, _ := later.Start(t)
 	postsACard(t, js, logs)
 	if body, code := getBody(t, "http://"+logs.addr()+"/healthz"); code != http.StatusOK {
 		t.Errorf("/healthz once connected is %d %s, want 200", code, body)
+	}
+	stops(t, cancel, done)
+}
+
+// Stopped while still waiting for NATS's first connection, the service stops
+// cleanly.
+func TestRunStopsCleanlyWhileWaitingForNATS(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	logs := newReadyLog()
+	cfg := Config{Addr: "127.0.0.1:0", Cards: true, Sink: SinkConsole, Src: "live", NATSURL: natstest.FreeURL(t).URL}
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, cfg, NewLogger(logs, slog.LevelInfo), "test") }()
+	waitServing(t, logs, done)
+	if !strings.Contains(logs.String(), "waiting for NATS's first connection") {
+		t.Errorf("no wait logged:\n%s", logs.String())
 	}
 	stops(t, cancel, done)
 }
