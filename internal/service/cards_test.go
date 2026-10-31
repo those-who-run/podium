@@ -32,16 +32,6 @@ func TestRunPostsTheCardsFromTheBus(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := ended[0]
-	h, data, err := ce.Encode(e, ce.Event{ID: "replay-svc:" + e.GetSessionId() + ":session.ended:1", Source: "/twr/ecu/gt7", Time: time.Now()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := js.PublishMsg(t.Context(), &nats.Msg{
-		Subject: "twr.v1.replay-svc.evt." + e.GetSessionId() + ".session.ended", Header: nats.Header(h), Data: data,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	logs := newReadyLog()
@@ -55,6 +45,25 @@ func TestRunPostsTheCardsFromTheBus(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("not serving after 10 s")
 	}
+	// The consumer posts only what ends once it exists.
+	for made := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, err := js.Consumer(t.Context(), "EVENTS", "cards-replay-svc"); err == nil {
+			break
+		}
+		if time.Now().After(made) {
+			t.Fatalf("no consumer after 10 s:\n%s", logs.String())
+		}
+	}
+	h, data, err := ce.Encode(e, ce.Event{ID: "replay-svc:" + e.GetSessionId() + ":session.ended:1", Source: "/twr/ecu/gt7", Time: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.PublishMsg(t.Context(), &nats.Msg{
+		Subject: "twr.v1.replay-svc.evt." + e.GetSessionId() + ".session.ended", Header: nats.Header(h), Data: data,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	deadline := time.Now().Add(15 * time.Second)
 	for !strings.Contains(logs.String(), `"msg":"card posted"`) {
 		if time.Now().After(deadline) {

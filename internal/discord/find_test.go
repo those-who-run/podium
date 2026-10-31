@@ -2,7 +2,9 @@ package discord
 
 import (
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -10,18 +12,53 @@ import (
 	"github.com/those-who-run/podium/internal/card"
 )
 
-// paddock#67, R3: Find reads the channel's latest messages and finds a card by
-// its link, or by its title and start when it has none.
+// fakeChannel answers GET /users/@me with the bot and GET
+// /channels/42/messages with messages, counting each request by path.
+func fakeChannel(t *testing.T, me, messages string, status int) (*httptest.Server, map[string]int) {
+	t.Helper()
+	asked := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked[r.URL.Path]++
+		if r.Header.Get("Authorization") != "Bot tok" || r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/users/@me":
+			_, _ = io.WriteString(w, me)
+		case "/channels/42/messages":
+			if r.URL.Query().Get("limit") != "50" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if status != 0 {
+				w.Header().Set("Retry-After", "1.5")
+				w.WriteHeader(status)
+			}
+			_, _ = io.WriteString(w, messages)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, asked
+}
+
+// paddock#67, R3: Find reads the channel's latest messages and finds the
+// bot's own card, in a rich embed, by its link, or by its title and start
+// when it has none.
 func TestFindLooksForTheCardInTheChannel(t *testing.T) {
 	unlinked := testCard
 	unlinked.URL = ""
 	messages := `[
-		{"id": "1", "embeds": [{"title": "Other · session", "url": "http://pw/?session=other"}]},
-		{"id": "2", "embeds": []},
-		{"id": "3", "embeds": [{"title": "Sportsland SUGO · 5-lap race", "url": "http://pw/?session=s"}]},
-		{"id": "4", "embeds": [{"title": "Sportsland SUGO · 5-lap race", "timestamp": "2026-10-18T19:00:00+00:00"}]}
+		{"id": "1", "author": {"id": "bot"}, "embeds": [{"type": "rich", "title": "Other · session", "url": "http://pw/?session=other"}]},
+		{"id": "2", "author": {"id": "bot"}, "embeds": []},
+		{"id": "5", "author": {"id": "someone"}, "embeds": [{"type": "rich", "url": "http://pw/?session=s"}]},
+		{"id": "6", "author": {"id": "bot"}, "embeds": [{"type": "link", "url": "http://pw/?session=s"}]},
+		{"id": "3", "author": {"id": "bot"}, "embeds": [{"type": "rich", "title": "Sportsland SUGO · 5-lap race", "url": "http://pw/?session=s"}]},
+		{"id": "4", "author": {"id": "bot"}, "embeds": [{"type": "rich", "title": "Sportsland SUGO · 5-lap race", "timestamp": "2026-10-18T19:00:00+00:00"}]}
 	]`
-	srv, reqs, _ := fake(t, http.StatusOK, messages)
+	srv, asked := fakeChannel(t, `{"id": "bot"}`, messages, 0)
 	p := &Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}
 	for _, c := range []struct {
 		name string
@@ -42,28 +79,33 @@ func TestFindLooksForTheCardInTheChannel(t *testing.T) {
 			}
 		})
 	}
-	r := (*reqs)[0]
-	if r.Method != http.MethodGet || r.URL.Path != "/channels/42/messages" || r.URL.Query().Get("limit") != "50" ||
-		r.Header.Get("Authorization") != "Bot tok" {
-		t.Errorf("request %s %s %v", r.Method, r.URL, r.Header)
+	if asked["/users/@me"] != 1 {
+		t.Errorf("asked who the bot is %d times, want once", asked["/users/@me"])
 	}
 }
 
 func TestFindFailures(t *testing.T) {
-	srv, _, _ := fake(t, http.StatusForbidden, `{"message": "Missing Access"}`)
-	_, _, err := (&Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}).Find(t.Context(), testCard)
+	forbidden, _ := fakeChannel(t, `{"id": "bot"}`, `{"message": "Missing Access"}`, http.StatusForbidden)
+	_, _, err := (&Poster{BaseURL: forbidden.URL, Token: "tok", ChannelID: "42"}).Find(t.Context(), testCard)
 	var status *StatusError
 	if !errors.As(err, &status) || status.Status != http.StatusForbidden || strings.Contains(err.Error(), "tok") {
 		t.Errorf("a 403 is %v", err)
 	}
-	limited, _, _ := fake(t, http.StatusTooManyRequests, `{"retry_after": 1.5}`)
+	limited, _ := fakeChannel(t, `{"id": "bot"}`, `{}`, http.StatusTooManyRequests)
 	_, _, err = (&Poster{BaseURL: limited.URL, Token: "tok", ChannelID: "42"}).Find(t.Context(), testCard)
 	if !errors.As(err, &status) || status.RetryAfter != 1500*time.Millisecond {
 		t.Errorf("a 429 is %v", err)
 	}
-	garbled, _, _ := fake(t, http.StatusOK, `{"not": "a list"}`)
+	garbled, _ := fakeChannel(t, `{"id": "bot"}`, `{"not": "a list"}`, 0)
 	if _, _, err := (&Poster{BaseURL: garbled.URL, Token: "tok", ChannelID: "42"}).Find(t.Context(), testCard); err == nil {
 		t.Error("an answer that isn't a list of messages is no error")
+	}
+	nobody, _ := fakeChannel(t, `{}`, `[]`, 0)
+	if _, _, err := (&Poster{BaseURL: nobody.URL, Token: "tok", ChannelID: "42"}).Find(t.Context(), testCard); err == nil {
+		t.Error("a bot with no id is no error")
+	}
+	if _, _, err := (&Poster{BaseURL: forbidden.URL, Token: "wrong", ChannelID: "42"}).Find(t.Context(), testCard); err == nil {
+		t.Error("a refused token is no error")
 	}
 	if _, _, err := (&Poster{}).Find(t.Context(), testCard); err == nil {
 		t.Error("no token and channel is no error")

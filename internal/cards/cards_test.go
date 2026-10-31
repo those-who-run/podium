@@ -60,47 +60,81 @@ func publish(t *testing.T, js jetstream.JetStream, e *eventsv1.SessionEnded, msg
 
 func endedID(sid string) string { return src + ":" + sid + ":session.ended:1" }
 
-// fakeDiscord is Discord's Create Message and Get Channel Messages for one
-// channel: each card sent is a message the channel lists, newest first.
+// fakeDiscord is Discord's Create Message, Get Channel Messages and Get
+// Current User for one channel and the bot "bot": each card sent is a message
+// the channel lists, newest first. A send with a nonce it has had before
+// answers with that message, as Discord's enforce_nonce does.
 type fakeDiscord struct {
-	mu    sync.Mutex
-	sent  []discord.Embed
-	fails []int // the status of each next send, before one succeeds
-	read  int   // the status Get Channel Messages answers with; 0 is 200
+	mu      sync.Mutex
+	sent    []discord.Embed
+	nonces  []string // the nonce of each send that reached it
+	byNonce map[string]int
+	fails   []int // the status of each next send, before one succeeds
+	lose    int   // how many of the next answers to a send are lost (the connection cut)
+	read    int   // the status Get Channel Messages answers with; 0 is 200
 }
 
 func (f *fakeDiscord) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if r.Method == http.MethodGet && r.URL.Path == "/users/@me" {
+		_, _ = io.WriteString(w, `{"id": "bot"}`)
+		return
+	}
 	if r.Method == http.MethodGet {
 		if f.read != 0 {
 			w.WriteHeader(f.read)
-			_, _ = io.WriteString(w, `{"message": "Missing Access"}`)
+			_, _ = io.WriteString(w, `{"message": "no"}`)
 			return
+		}
+		type author struct {
+			ID string `json:"id"`
 		}
 		type msg struct {
 			ID     string          `json:"id"`
+			Author author          `json:"author"`
 			Embeds []discord.Embed `json:"embeds"`
 		}
 		var list []msg
 		for i := len(f.sent) - 1; i >= 0; i-- {
-			list = append(list, msg{ID: fmt.Sprint(1000 + i), Embeds: []discord.Embed{f.sent[i]}})
+			e := f.sent[i]
+			e.Type = "rich"
+			list = append(list, msg{ID: fmt.Sprint(1000 + i), Author: author{"bot"}, Embeds: []discord.Embed{e}})
 		}
 		_ = json.NewEncoder(w).Encode(list)
 		return
 	}
+	var m struct {
+		Embeds       []discord.Embed `json:"embeds"`
+		Nonce        string          `json:"nonce"`
+		EnforceNonce bool            `json:"enforce_nonce"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&m)
+	f.nonces = append(f.nonces, m.Nonce)
 	if len(f.fails) > 0 {
 		w.WriteHeader(f.fails[0])
 		f.fails = f.fails[1:]
 		_, _ = io.WriteString(w, `{"message": "no"}`)
 		return
 	}
-	var m struct {
-		Embeds []discord.Embed `json:"embeds"`
+	n, seen := f.byNonce[m.Nonce]
+	if !seen || !m.EnforceNonce {
+		f.sent = append(f.sent, m.Embeds[0])
+		n = len(f.sent) - 1
+		if f.byNonce == nil {
+			f.byNonce = map[string]int{}
+		}
+		f.byNonce[m.Nonce] = n
 	}
-	_ = json.NewDecoder(r.Body).Decode(&m)
-	f.sent = append(f.sent, m.Embeds[0])
-	_, _ = fmt.Fprintf(w, `{"id": "%d"}`, 1000+len(f.sent)-1)
+	if f.lose > 0 {
+		f.lose--
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+		return
+	}
+	_, _ = fmt.Fprintf(w, `{"id": "%d"}`, 1000+n)
 }
 
 func (f *fakeDiscord) count() int {
@@ -130,6 +164,11 @@ func run(t *testing.T, p *Poster) (stop func()) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx) }()
+	// The consumer delivers only what is published once it exists.
+	eventually(t, "the consumer made", func() bool {
+		_, err := p.JS.Consumer(t.Context(), Stream, Consumer(src))
+		return err == nil
+	})
 	stopped := false
 	stop = func() {
 		if stopped {
@@ -237,14 +276,17 @@ func TestEachCardIsPostedOnce(t *testing.T) {
 	p := newPoster(t, js, kv, f)
 	e := fixture(t, "real-nuc-suzuka-no-stop-2026-10-15")[0]
 	sid := e.GetSessionId()
-	publish(t, js, e, endedID(sid))
 	stop := run(t, p)
+	publish(t, js, e, endedID(sid))
 	eventually(t, "one card posted", func() bool { return p.Counters.Get(OK) == 1 && settled(t, js) })
 	stop()
 	if f.count() != 1 || f.sent[0].Title != "Suzuka Circuit East Course · 6-lap race" {
 		t.Fatalf("sent %v", f.sent)
 	}
 	checkPostedOnce(t, js, kv, sid, "1000")
+	if want := Nonce(src, sid); len(f.nonces) != 1 || f.nonces[0] != want || len(want) != 25 {
+		t.Errorf("sent with nonces %v, want %s", f.nonces, want)
+	}
 
 	// AC2: a new Nats-Msg-Id, so the stream's dedupe doesn't catch it, then
 	// a delivery the test takes and never acks, so the stream delivers it
@@ -293,6 +335,7 @@ func TestRetriesAsV1(t *testing.T) {
 		{"twice then posted", []int{500, 502}, 3, []time.Duration{2 * time.Second, 4 * time.Second}, true},
 		{"three times", []int{500, 500, 500}, 3, []time.Duration{2 * time.Second, 4 * time.Second}, false},
 		{"rate limited", []int{429}, 2, []time.Duration{1500 * time.Millisecond}, true},
+		{"rate limited for long", []int{-429}, 2, []time.Duration{maxWait}, true},
 		{"forbidden", []int{403}, 1, nil, false},
 		{"no channel", []int{404}, 1, nil, false},
 	} {
@@ -302,10 +345,15 @@ func TestRetriesAsV1(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				sends++
 				if sends <= len(c.fails) {
-					if c.fails[sends-1] == http.StatusTooManyRequests {
+					status := c.fails[sends-1]
+					switch status {
+					case http.StatusTooManyRequests:
 						w.Header().Set("Retry-After", "1.5")
+					case -http.StatusTooManyRequests:
+						status = http.StatusTooManyRequests
+						w.Header().Set("Retry-After", "600")
 					}
-					w.WriteHeader(c.fails[sends-1])
+					w.WriteHeader(status)
 					return
 				}
 				_, _ = io.WriteString(w, `{"id": "7"}`)
@@ -318,7 +366,7 @@ func TestRetriesAsV1(t *testing.T) {
 					return nil
 				},
 			}
-			id, err := p.attempt(t.Context(), slog.New(slog.DiscardHandler), card.Card{Title: "T"})
+			id, err := p.attempt(t.Context(), slog.New(slog.DiscardHandler), "n", card.Card{Title: "T"})
 			if (err == nil) != c.ok || (c.ok && id != "7") || sends != c.sends || fmt.Sprint(waits) != fmt.Sprint(c.waits) {
 				t.Errorf("%q, %v after %d sends and waits %v; want ok %v after %d sends and waits %v",
 					id, err, sends, waits, c.ok, c.sends, c.waits)
@@ -335,9 +383,9 @@ func TestAFailedCardIsCountedAndTheNextPosted(t *testing.T) {
 	p := newPoster(t, js, kv, f)
 	ended := fixture(t, "real-nuc-sugo-restarts-2026-10-18")
 	first, last := ended[0], ended[2]
+	run(t, p)
 	publish(t, js, first, endedID(first.GetSessionId()))
 	publish(t, js, last, endedID(last.GetSessionId()))
-	run(t, p)
 	eventually(t, "both handled", func() bool { return settled(t, js) && p.Counters.Get(OK) == 1 })
 	if p.Counters.Get(Failed) != 1 || f.count() != 1 {
 		t.Errorf("%d failed, %d sent; want 1 and 1", p.Counters.Get(Failed), f.count())
@@ -371,12 +419,12 @@ func TestAPosterStoppedAfterTheSend(t *testing.T) {
 			f := &fakeDiscord{read: c.read}
 			e := fixture(t, "real-nuc-suzuka-no-stop-2026-10-15")[0]
 			sid := e.GetSessionId()
-			publish(t, js, e, endedID(sid))
 
 			if c.sent {
 				p1 := newPoster(t, js, kv, f)
 				p1.afterSend = func() error { return errStopped }
 				stop1 := run(t, p1)
+				publish(t, js, e, endedID(sid))
 				eventually(t, "the card sent", func() bool { return f.count() == 1 })
 				stop1()
 			} else {
@@ -393,6 +441,9 @@ func TestAPosterStoppedAfterTheSend(t *testing.T) {
 			p2 := newPoster(t, js, kv, f)
 			p2.now = func() time.Time { return time.Now().Add(2 * stale) }
 			run(t, p2)
+			if !c.sent {
+				publish(t, js, e, endedID(sid))
+			}
 			eventually(t, "the session.ended acked", func() bool { return settled(t, js) })
 			if f.count() != c.sends || p2.Counters.Get(OK) != c.ok || p2.Counters.Get(Failed) != c.fail {
 				t.Errorf("%d sent, %d ok, %d failed; want %d, %d, %d", f.count(), p2.Counters.Get(OK),
@@ -410,9 +461,11 @@ func TestAPosterStoppedAfterTheSend(t *testing.T) {
 	}
 }
 
-type senderFunc func(context.Context, card.Card) (string, error)
+type senderFunc func(context.Context, string, card.Card) (string, error)
 
-func (f senderFunc) Send(ctx context.Context, c card.Card) (string, error) { return f(ctx, c) }
+func (f senderFunc) Send(ctx context.Context, nonce string, c card.Card) (string, error) {
+	return f(ctx, nonce, c)
+}
 
 // R3: a "posting" record under a minute old is another poster still at it,
 // so the session.ended waits and nothing is sent; a sink that can't look in
@@ -430,7 +483,7 @@ func TestARecordFoundBeforeTheSend(t *testing.T) {
 	if err := p.post(t.Context(), log, "young", c); !errors.Is(err, errLater) || f.count() != 0 {
 		t.Errorf("a young posting record: %v after %d sends, want later and none", err, f.count())
 	}
-	p.Sender = senderFunc(func(context.Context, card.Card) (string, error) { return "", nil })
+	p.Sender = senderFunc(func(context.Context, string, card.Card) (string, error) { return "", nil })
 	p.now = func() time.Time { return time.Now().Add(2 * stale) }
 	if err := p.post(t.Context(), log, "young", c); !errors.Is(err, errGivenUp) || p.Counters.Get(Failed) != 1 {
 		t.Errorf("a stale record and a sink that can't look: %v, %d failed", err, p.Counters.Get(Failed))
@@ -452,10 +505,10 @@ func TestASessionWithNoFullLapIsSkipped(t *testing.T) {
 	f := &fakeDiscord{}
 	p := newPoster(t, js, kv, f)
 	ended := fixture(t, "real-nuc-sugo-restarts-2026-10-18")
+	run(t, p)
 	for _, e := range ended {
 		publish(t, js, e, endedID(e.GetSessionId()))
 	}
-	run(t, p)
 	eventually(t, "three handled", func() bool { return settled(t, js) && p.Counters.Get(OK) == 2 })
 	if p.Counters.Get(Skipped) != 1 || p.Counters.Get(Failed) != 0 || f.count() != 2 {
 		t.Errorf("%d skipped, %d failed, %d sent; want 1, 0 and 2", p.Counters.Get(Skipped), p.Counters.Get(Failed), f.count())
@@ -479,6 +532,7 @@ func TestWhatIsNotASessionEndedIsDropped(t *testing.T) {
 	js, kv := natstest.Start(t)
 	f := &fakeDiscord{}
 	p := newPoster(t, js, kv, f)
+	run(t, p)
 	if _, err := js.Publish(t.Context(), "twr.v1."+src+".evt.x.session.ended", []byte("{}")); err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +549,6 @@ func TestWhatIsNotASessionEndedIsDropped(t *testing.T) {
 	}
 	e := fixture(t, "real-nuc-suzuka-no-stop-2026-10-15")[0]
 	publish(t, js, e, endedID(e.GetSessionId()))
-	run(t, p)
 	eventually(t, "all handled", func() bool { return settled(t, js) && p.Counters.Get(OK) == 1 })
 	if f.count() != 1 {
 		t.Errorf("%d sent, want 1", f.count())
@@ -532,5 +585,101 @@ func TestRunNeedsTheStream(t *testing.T) {
 	p := &Poster{JS: s.JS, Src: src, Logger: slog.New(slog.DiscardHandler)}
 	if err := p.Run(t.Context()); err == nil || !strings.Contains(err.Error(), Consumer(src)) {
 		t.Errorf("Run = %v, want the consumer's error", err)
+	}
+}
+
+// The consumer posts only the sessions that end once it exists: a first start
+// doesn't post the 30 days of cards EVENTS keeps.
+func TestOnlyNewSessionsArePosted(t *testing.T) {
+	js, kv := natstest.Start(t)
+	f := &fakeDiscord{}
+	p := newPoster(t, js, kv, f)
+	ended := fixture(t, "real-nuc-sugo-restarts-2026-10-18")
+	old, fresh := ended[0], ended[2]
+	publish(t, js, old, endedID(old.GetSessionId()))
+	run(t, p)
+	publish(t, js, fresh, endedID(fresh.GetSessionId()))
+	eventually(t, "the new card posted", func() bool { return settled(t, js) && p.Counters.Get(OK) == 1 })
+	if f.count() != 1 {
+		t.Errorf("%d sent, want 1", f.count())
+	}
+	if _, err := kv.Get(t.Context(), Key(src, old.GetSessionId())); !errors.Is(err, jetstream.ErrKeyNotFound) {
+		t.Errorf("the session before the consumer: %v, want no record", err)
+	}
+	checkPostedOnce(t, js, kv, fresh.GetSessionId(), "1000")
+}
+
+// The review of podium#17: a channel that can't be read for now (a 500, a
+// rate limit) is asked again later, honouring the rate limit's wait, and
+// nothing is counted failed (one the bot may not read gives the card up:
+// TestAPosterStoppedAfterTheSend).
+func TestAChannelThatCannotBeReadNow(t *testing.T) {
+	js, kv := natstest.Start(t)
+	f := &fakeDiscord{read: http.StatusInternalServerError}
+	p := newPoster(t, js, kv, f)
+	p.now = func() time.Time { return time.Now().Add(2 * stale) }
+	log := slog.New(slog.DiscardHandler)
+	c := card.Card{Title: "T"}
+	if _, err := kv.Create(t.Context(), Key(src, "s"), (&Poster{Src: src}).record("s", statev1.CardState_CARD_STATE_POSTING, "")); err != nil {
+		t.Fatal(err)
+	}
+	var later *laterError
+	if err := p.post(t.Context(), log, "s", c); !errors.As(err, &later) || later.delay != stale ||
+		p.Counters.Get(Failed) != 0 || f.count() != 0 {
+		t.Errorf("a 500: %v, %d failed, %d sent; want later in a minute, nothing failed or sent", err, p.Counters.Get(Failed), f.count())
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/users/@me" {
+			_, _ = io.WriteString(w, `{"id": "bot"}`)
+			return
+		}
+		w.Header().Set("Retry-After", "7")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	p.Sender = &discord.Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}
+	if err := p.post(t.Context(), log, "s", c); !errors.As(err, &later) || later.delay != 7*time.Second || p.Counters.Get(Failed) != 0 {
+		t.Errorf("a 429: %v, want later in 7 s", err)
+	}
+	if rec := record(t, kv, "s"); rec.GetState() != statev1.CardState_CARD_STATE_POSTING || p.Counters.Get(Failed) != 0 {
+		t.Errorf("the record is %v and %d failed: want posting, none failed", rec, p.Counters.Get(Failed))
+	}
+}
+
+// The review of podium#17: a send Discord took whose answer was lost is sent
+// again with the same nonce, which Discord answers with the message it has:
+// one card. When every answer is lost the posting record stays, the
+// session.ended is delivered again later, and the card is found in the
+// channel and recorded at the message's own time.
+func TestALostAnswerPostsOneCard(t *testing.T) {
+	js, kv := natstest.Start(t)
+	log := slog.New(slog.DiscardHandler)
+	c := card.Card{Title: "T"}
+
+	f := &fakeDiscord{lose: 1}
+	p := newPoster(t, js, kv, f)
+	if err := p.post(t.Context(), log, "one", c); err != nil || f.count() != 1 || len(f.nonces) != 2 ||
+		f.nonces[0] != f.nonces[1] || f.nonces[0] != Nonce(src, "one") {
+		t.Errorf("one answer lost: %v, %d cards, nonces %v; want one card, sent twice with one nonce", err, f.count(), f.nonces)
+	}
+
+	f = &fakeDiscord{lose: attempts}
+	p = newPoster(t, js, kv, f)
+	var later *laterError
+	if err := p.post(t.Context(), log, "all", c); !errors.As(err, &later) || later.delay != stale ||
+		f.count() != 1 || p.Counters.Get(Failed) != 0 {
+		t.Errorf("every answer lost: %v, %d cards, %d failed; want later, one card, none failed", err, f.count(), p.Counters.Get(Failed))
+	}
+	if rec := record(t, kv, "all"); rec.GetState() != statev1.CardState_CARD_STATE_POSTING {
+		t.Fatalf("the record is %v, want posting kept", rec)
+	}
+	p.now = func() time.Time { return time.Now().Add(2 * stale) }
+	if err := p.post(t.Context(), log, "all", c); err != nil || f.count() != 1 {
+		t.Errorf("delivered again: %v, %d cards; want found, one card", err, f.count())
+	}
+	rec := record(t, kv, "all")
+	created, _ := discord.Created("1000")
+	if rec.GetState() != statev1.CardState_CARD_STATE_POSTED || rec.GetMessageId() != "1000" || !rec.GetAt().AsTime().Equal(created) {
+		t.Errorf("the record is %v, want posted as 1000 at %v", rec, created)
 	}
 }

@@ -37,7 +37,7 @@ func TestTheConsoleSaysWhenItCannotWrite(t *testing.T) {
 // paddock#67: Send is Post, for the poster, with no message id.
 func TestSendWritesTheCardWithNoID(t *testing.T) {
 	var out strings.Builder
-	id, err := NewConsole(&out).Send(t.Context(), card.Card{Title: "T · session", Footer: "F"})
+	id, err := NewConsole(&out).Send(t.Context(), "nonce", card.Card{Title: "T · session", Footer: "F"})
 	if err != nil || id != "" || !strings.Contains(out.String(), "T · session") {
 		t.Errorf("Send = %q, %v; wrote %q", id, err, out.String())
 	}

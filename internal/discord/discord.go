@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/those-who-run/podium/internal/card"
@@ -57,6 +58,10 @@ type Poster struct {
 	// Logger is where it warns of a message sent whose id it couldn't read; nil
 	// is slog.Default().
 	Logger *slog.Logger
+
+	// me is the bot's own user id, read once by Find (GET /users/@me).
+	mu sync.Mutex
+	me string
 }
 
 // StatusError is a response from Discord other than a success.
@@ -86,16 +91,29 @@ func (e *StatusError) Permanent() bool {
 // Post sends c to the channel. sid is for the caller's logs; the card carries
 // everything Discord shows.
 func (p *Poster) Post(ctx context.Context, _ string, c card.Card) error {
-	_, err := p.Send(ctx, c)
+	_, err := p.Send(ctx, "", c)
 	return err
 }
 
-// Send sends c to the channel and returns the message's id.
-func (p *Poster) Send(ctx context.Context, c card.Card) (string, error) {
+// MaxNonce is the longest nonce Discord takes: 25 characters.
+const MaxNonce = 25
+
+// Send sends c to the channel and returns the message's id. A nonce, when
+// given, is sent with enforce_nonce: Discord then answers a send it has
+// already taken from this bot in the last few minutes with that message rather
+// than a second one, so a retry after a send that timed out but arrived posts
+// one card (paddock#67). It is at most MaxNonce characters.
+func (p *Poster) Send(ctx context.Context, nonce string, c card.Card) (string, error) {
 	if p.Token == "" || p.ChannelID == "" {
 		return "", errors.New("discord: posting needs a bot token and a channel id")
 	}
-	body, err := json.Marshal(message{Embeds: []Embed{EmbedOf(c)}, AllowedMentions: allowedMentions{Parse: []string{}}})
+	if len(nonce) > MaxNonce {
+		return "", fmt.Errorf("discord: the nonce %q is longer than %d characters", nonce, MaxNonce)
+	}
+	body, err := json.Marshal(message{
+		Embeds: []Embed{EmbedOf(c)}, AllowedMentions: allowedMentions{Parse: []string{}},
+		Nonce: nonce, EnforceNonce: nonce != "",
+	})
 	if err != nil {
 		return "", fmt.Errorf("discord: %w", err)
 	}
@@ -158,23 +176,80 @@ func (p *Poster) Send(ctx context.Context, c card.Card) (string, error) {
 const recent = 50
 
 // Find looks for c among the channel's latest 50 messages, for a card whose
-// post may have been cut short after the send (paddock#67, R3). A message
-// matches when one of its embeds links to c's URL, or, for a card with no
-// link, has no link and c's title and timestamp. It returns the message's id and true when
-// one matches. Reading the channel needs the bot's Read Message History
-// permission there; without it Find returns a StatusError (403).
+// post may have been cut short after the send (paddock#67, R3). Only the bot's
+// own messages count, and only their rich embeds: a message matches when one
+// links to c's URL, or, for a card with no link, has no link and c's title and
+// timestamp. It returns the message's id and true when one matches. Reading
+// the channel needs the bot's Read Message History permission there; without
+// it Find returns a StatusError (403).
 func (p *Poster) Find(ctx context.Context, c card.Card) (string, bool, error) {
 	if p.Token == "" || p.ChannelID == "" {
 		return "", false, errors.New("discord: reading the channel needs a bot token and a channel id")
 	}
+	me, err := p.self(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	data, err := p.get(ctx, "/channels/"+p.ChannelID+"/messages?limit="+strconv.Itoa(recent))
+	if err != nil {
+		return "", false, err
+	}
+	var messages []struct {
+		ID     string `json:"id"`
+		Author struct {
+			ID string `json:"id"`
+		} `json:"author"`
+		Embeds []Embed `json:"embeds"`
+	}
+	if err := json.Unmarshal(data, &messages); err != nil {
+		return "", false, fmt.Errorf("discord: the channel's messages are unreadable: %w", err)
+	}
+	want := EmbedOf(c)
+	for _, m := range messages {
+		if m.Author.ID != me {
+			continue
+		}
+		for _, e := range m.Embeds {
+			if e.Type == "rich" && same(e, want) {
+				return m.ID, true, nil
+			}
+		}
+	}
+	return "", false, nil
+}
+
+// self is the bot's own user id, read from GET /users/@me the first time it is
+// asked for and kept.
+func (p *Poster) self(ctx context.Context) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.me != "" {
+		return p.me, nil
+	}
+	data, err := p.get(ctx, "/users/@me")
+	if err != nil {
+		return "", err
+	}
+	var user struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(data, &user); err != nil || user.ID == "" {
+		return "", errors.New("discord: the bot's own user is unreadable")
+	}
+	p.me = user.ID
+	return p.me, nil
+}
+
+// get is a GET of path under the API, as the bot: the body of a success, or a
+// StatusError.
+func (p *Poster) get(ctx context.Context, path string) ([]byte, error) {
 	base := p.BaseURL
 	if base == "" {
 		base = DefaultBaseURL
 	}
-	url := strings.TrimRight(base, "/") + "/channels/" + p.ChannelID + "/messages?limit=" + strconv.Itoa(recent)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+path, nil)
 	if err != nil {
-		return "", false, fmt.Errorf("discord: %w", err)
+		return nil, fmt.Errorf("discord: %w", err)
 	}
 	req.Header.Set("Authorization", "Bot "+p.Token)
 	req.Header.Set("User-Agent", userAgent)
@@ -184,7 +259,7 @@ func (p *Poster) Find(ctx context.Context, c card.Card) (string, bool, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", false, fmt.Errorf("discord: %w", err)
+		return nil, fmt.Errorf("discord: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// 50 messages with their embeds are well under a megabyte.
@@ -194,27 +269,27 @@ func (p *Poster) Find(ctx context.Context, c card.Card) (string, bool, error) {
 		if resp.StatusCode == http.StatusTooManyRequests {
 			e.RetryAfter = retryAfter(resp.Header.Get("Retry-After"), data)
 		}
-		return "", false, e
+		return nil, e
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("discord: reading the channel: %w", err)
+		return nil, fmt.Errorf("discord: reading %s: %w", path, err)
 	}
-	var messages []struct {
-		ID     string  `json:"id"`
-		Embeds []Embed `json:"embeds"`
+	return data, nil
+}
+
+// discordEpoch is the first second of 2015, from which a snowflake counts its
+// milliseconds.
+const discordEpoch = 1420070400000
+
+// Created is when the message with id was created, read from the id itself (a
+// snowflake: its top 42 bits are milliseconds since 2015), and false when id
+// isn't one.
+func Created(id string) (time.Time, bool) {
+	n, err := strconv.ParseUint(id, 10, 64)
+	if err != nil || n == 0 {
+		return time.Time{}, false
 	}
-	if err := json.Unmarshal(data, &messages); err != nil {
-		return "", false, fmt.Errorf("discord: the channel's messages are unreadable: %w", err)
-	}
-	want := EmbedOf(c)
-	for _, m := range messages {
-		for _, e := range m.Embeds {
-			if same(e, want) {
-				return m.ID, true, nil
-			}
-		}
-	}
-	return "", false, nil
+	return time.UnixMilli(int64(n>>22) + discordEpoch).UTC(), true //nolint:gosec // 42 bits: no overflow
 }
 
 // same is whether embed e, as Discord returns it, is the card want: the same
@@ -258,6 +333,8 @@ func retryAfter(header string, body []byte) time.Duration {
 type message struct {
 	Embeds          []Embed         `json:"embeds"`
 	AllowedMentions allowedMentions `json:"allowed_mentions"`
+	Nonce           string          `json:"nonce,omitempty"`
+	EnforceNonce    bool            `json:"enforce_nonce,omitempty"`
 }
 
 // allowedMentions with nothing to parse: a card never pings anyone, whatever a
@@ -268,6 +345,9 @@ type allowedMentions struct {
 
 // Embed is Discord's embed object, the fields a card fills.
 type Embed struct {
+	// Type is the embed's type as Discord returns it: "rich" for an embed a
+	// bot sent. Left out when sending, where rich is the default.
+	Type        string       `json:"type,omitempty"`
 	Title       string       `json:"title"`
 	Description string       `json:"description"`
 	URL         string       `json:"url,omitempty"`

@@ -52,21 +52,40 @@ the Discord message's id, publishes `twr.v1.<src>.evt.<sid>.card.posted`
 `session.ended` that finds `posted` posts nothing, so one delivered again, or
 published again, posts no second card.
 
+- **Only sessions that end after the consumer is first made.** The consumer
+  delivers new messages only, so its first start doesn't post the cards of
+  the 30 days of sessions `EVENTS` keeps. NATS can't change a durable
+  consumer's deliver policy, so changing this means deleting `cards-<src>`.
+- **One replica.** podium runs as a single replica. The `cards` bucket keeps
+  two posters from both sending, but a rate limit's wait or a slow Discord can
+  hold a card past the consumer's 5 min ack wait, and a second replica would
+  then take the same `session.ended` and wait on the first's `posting` record.
 - **Retries, as v1:** three attempts, waiting 2 s then 4 s, or as long as a
-  rate limit asks. A refused token, a missing channel or a missing permission
-  (401, 403, 404) is tried once and logged with the hint to check the channel
-  id and the bot's permissions. A card that fails is counted `failed`, loses
-  its `posting` record, and never stops the next.
+  rate limit asks, up to a minute, so a card's attempts end within the ack
+  wait. Every send of a session's card carries the same nonce (25 characters
+  of sha256 of `<src>:<sid>`) with `enforce_nonce`, so Discord answers a send
+  it already took with that message, not a second one. A refused token, a
+  missing channel or a missing permission (401, 403, 404) is tried once and
+  logged with the hint to check the channel id and the bot's permissions.
+  A card Discord refused is counted `failed`, loses its `posting` record, and
+  never stops the next. A card whose last send failed on the way (a timeout,
+  a reset), which Discord may have taken, keeps its record and is delivered
+  again a minute later, to be looked for in the channel.
 - **A poster stopped mid-post:** a `posting` record under a minute old is a
   poster still at it, and the `session.ended` waits. An older one is checked
-  against the channel's latest 50 messages, by the card's pit wall link (or its
-  title and start): found, it is recorded as `posted` and not sent again; not
-  found, it is sent. When the channel can't be read, podium errs on the side
-  of a missed card rather than a double one, logs a warning, and counts it
-  `failed`: a missed card can be posted again by hand, while a double card is
-  what this exists to prevent. Reading the channel needs the bot's **Read
-  Message History** permission, beside View Channel, Send Messages and Embed
-  Links.
+  against the channel's latest 50 messages, only the bot's own and their rich
+  embeds, by the card's pit wall link (or its title and start): found, it is
+  recorded as `posted` at the message's own time and not sent again; not
+  found, it is sent. When the channel can't be read now (Discord down, a rate
+  limit), the `session.ended` is delivered again later, after the wait a rate
+  limit asks for. When the bot may not read it (401, 403, 404), podium errs on
+  the side of a missed card rather than a double one, logs a warning, and
+  counts it `failed`: a missed card can be posted again by hand, while a
+  double card is what this exists to prevent. Reading the channel needs the
+  bot's **Read Message History** permission, beside View Channel, Send
+  Messages and Embed Links.
+- **Stopping:** once the server has stopped, podium waits up to 5 s for a card
+  in flight to be recorded before it closes its NATS connection.
 - **No full lap:** no card and no record, counted `skipped`.
 - **The metric:** `GET /metrics` serves `gt7_results_posts_total{result}`
   (`ok`, `failed`, `skipped`), v1's series under its v1 name.
