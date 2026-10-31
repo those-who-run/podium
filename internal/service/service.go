@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -108,13 +109,21 @@ func NewLogger(w io.Writer, level slog.Level) *slog.Logger {
 
 // Handler serves the health endpoint, GET /healthz, which answers 200 with the
 // service's version while the process can serve requests, and GET /metrics,
-// the cards' counter in Prometheus's text format (paddock#67, R5).
-func Handler(version string, counters *cards.Counters) http.Handler {
+// the cards' counter in Prometheus's text format (paddock#67, R5). With cards
+// on, /healthz answers 503 until NATS's first connection, so the pod isn't
+// Ready on a connection it hasn't made (paddock#340); ready says whether it has
+// been made, and nil is always.
+func Handler(version string, counters *cards.Counters, ready func() bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		status := "ok"
+		if ready != nil && !ready() {
+			status = "waiting for NATS"
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
 		// An error here is the client gone; there is no one left to tell.
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": version})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": status, "version": version})
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -156,22 +165,43 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger, version string) e
 	if !cfg.Cards {
 		// R7: no results channel, no consumer.
 		logger.InfoContext(ctx, "cards off: TWR_DISCORD_RESULTS_CHANNEL_ID is not set")
-		return serve(ctx, ln, logger, version, counters)
+		return serve(ctx, ln, logger, version, counters, nil)
 	}
-	nc, err := nats.Connect(cfg.NATSURL, nats.Name("podium"), nats.MaxReconnects(-1))
+	// NATS not up yet at start is waited for, not a restart (paddock#340): Connect
+	// returns before the first connection is made, the client keeps trying, and
+	// the cards start once it is made.
+	first := newLatch()
+	nc, err := nats.Connect(cfg.NATSURL, nats.Name("podium"),
+		nats.RetryOnFailedConnect(true), nats.MaxReconnects(-1),
+		nats.ConnectHandler(func(*nats.Conn) { first.set() }))
 	if err != nil {
 		_ = ln.Close()
 		return fmt.Errorf("nats: %w", err)
 	}
 	defer nc.Close()
+	if nc.IsConnected() {
+		first.set()
+	} else {
+		logger.InfoContext(ctx, "waiting for NATS's first connection")
+	}
 	parent := ctx
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	posting, err := startCards(ctx, nc, cfg, logger, counters)
-	if err != nil {
-		_ = ln.Close()
-		return err
-	}
+	posting := make(chan error, 1)
+	go func() {
+		select {
+		case <-first.done:
+		case <-ctx.Done():
+			posting <- nil
+			return
+		}
+		started, err := startCards(ctx, nc, cfg, logger, counters)
+		if err != nil {
+			posting <- err
+			return
+		}
+		posting <- <-started
+	}()
 	posterDone := make(chan struct{})
 	go func() {
 		defer close(posterDone)
@@ -179,7 +209,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger, version string) e
 			cancel(err)
 		}
 	}()
-	err = serve(ctx, ln, logger, version, counters)
+	err = serve(ctx, ln, logger, version, counters, first.isSet)
 	if err != nil {
 		// Stop the poster too, which a failed server leaves running.
 		cancel(err)
@@ -227,6 +257,25 @@ func startCards(ctx context.Context, nc *nats.Conn, cfg Config, logger *slog.Log
 	return done, nil
 }
 
+// latch is set once and stays set: here, NATS's first connection.
+type latch struct {
+	once sync.Once
+	done chan struct{}
+}
+
+func newLatch() *latch { return &latch{done: make(chan struct{})} }
+
+func (l *latch) set() { l.once.Do(func() { close(l.done) }) }
+
+func (l *latch) isSet() bool {
+	select {
+	case <-l.done:
+		return true
+	default:
+		return false
+	}
+}
+
 // logWriter writes the console sink's cards as log lines, so the service's
 // output stays one JSON object a line.
 type logWriter struct{ logger *slog.Logger }
@@ -249,8 +298,10 @@ func newServer(h http.Handler, logger *slog.Logger) *http.Server {
 	}
 }
 
-func serve(ctx context.Context, ln net.Listener, logger *slog.Logger, version string, counters *cards.Counters) error {
-	srv := newServer(Handler(version, counters), logger)
+func serve(ctx context.Context, ln net.Listener, logger *slog.Logger, version string, counters *cards.Counters,
+	ready func() bool,
+) error {
+	srv := newServer(Handler(version, counters, ready), logger)
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 	logger.InfoContext(ctx, "serving", "addr", ln.Addr().String(), "version", version)

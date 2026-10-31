@@ -181,7 +181,33 @@ type Server struct {
 // bucket, stopped when the test ends.
 func Start(t testing.TB) (jetstream.JetStream, jetstream.KeyValue) {
 	t.Helper()
-	s := Bare(t)
+	return withDefs(t, Bare(t))
+}
+
+// FreeURL is the URL of a free port with no server on it yet, for a test of a
+// client that starts before its server: StartAt starts the server there.
+func FreeURL(t testing.TB) string {
+	t.Helper()
+	return "nats://127.0.0.1:" + strconv.Itoa(freePort(t))
+}
+
+// StartAt is Start on the port of url, which FreeURL gave.
+func StartAt(t testing.TB, url string) (jetstream.JetStream, jetstream.KeyValue) {
+	t.Helper()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(url, "nats://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return withDefs(t, bareOn(t, p))
+}
+
+// withDefs makes EVENTS and the cards bucket on s.
+func withDefs(t testing.TB, s Server) (jetstream.JetStream, jetstream.KeyValue) {
+	t.Helper()
 	var stream jetstream.StreamConfig
 	readDef(t, "events.json", &stream)
 	if _, err := s.JS.CreateStream(context.Background(), stream); err != nil {
@@ -218,10 +244,12 @@ func StartURL(t testing.TB) (string, jetstream.JetStream, jetstream.KeyValue) {
 // when the test ends.
 func Bare(t testing.TB) Server {
 	t.Helper()
-	bin, err := natsBinary()
-	if err != nil {
-		t.Fatalf("nats-server: %v", err)
-	}
+	return bareOn(t, freePort(t))
+}
+
+// freePort is a port nothing listens on now.
+func freePort(t testing.TB) int {
+	t.Helper()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
@@ -229,6 +257,16 @@ func Bare(t testing.TB) Server {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
+	return port
+}
+
+// bareOn is Bare on port.
+func bareOn(t testing.TB, port int) Server {
+	t.Helper()
+	bin, err := natsBinary()
+	if err != nil {
+		t.Fatalf("nats-server: %v", err)
+	}
 	cmd := exec.Command(bin, "-a", "127.0.0.1", "-p", strconv.Itoa(port), "-js", "-sd", t.TempDir()) //nolint:gosec // the pinned nats-server
 	var out strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &out
