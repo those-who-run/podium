@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/those-who-run/podium/compare/v0.1.2...v0.1.3) (2026-10-31)
+
+
+### Features
+
+* **card:** a ranked session is "qualifying or practice" ([#20](https://github.com/those-who-run/podium/issues/20)) ([dec9400](https://github.com/those-who-run/podium/commit/dec9400b6badfcd39c9b32ad5f871574a34ac0f1))
+
 ## [0.1.2](https://github.com/those-who-run/podium/compare/v0.1.1...v0.1.2) (2026-10-31)
 
 
