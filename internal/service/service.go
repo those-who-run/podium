@@ -1,7 +1,7 @@
 // Package service is podium's service, kept to the conventions every Go component
 // starts from (README.md, "Conventions"): configuration from the environment,
-// log/slog writing JSON, and a health endpoint. It serves only GET /healthz until
-// it posts the cards from the bus (paddock#67).
+// log/slog writing JSON, a health endpoint and its metrics. With cards on, it
+// posts each session's results card from the bus (internal/cards, paddock#67).
 package service
 
 import (
@@ -14,6 +14,13 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/those-who-run/podium/internal/cards"
+	"github.com/those-who-run/podium/internal/discord"
+	"github.com/those-who-run/podium/internal/sink"
 )
 
 // Config is the service's configuration, read from the environment by
@@ -24,7 +31,33 @@ type Config struct {
 	// LogLevel is the lowest level logged: LOG_LEVEL (debug, info, warn or error),
 	// info when unset.
 	LogLevel slog.Level
+	// Cards is whether the cards are posted: always with the console sink, and
+	// with the discord sink only when a results channel is set, as in v1, where
+	// an unset channel turned cards off (paddock#67, R7).
+	Cards bool
+	// Sink is where the cards go, TWR_PODIUM_SINK: discord (the default) or
+	// console, which writes them to the log's stream for replays and tests.
+	Sink string
+	// Src is the source whose sessions it posts, TWR_PODIUM_SRC: live unless
+	// set, or a replay's.
+	Src string
+	// NATSURL is the NATS server, TWR_NATS_URL; needed when cards are on.
+	NATSURL string
+	// ChannelID is the results channel, TWR_DISCORD_RESULTS_CHANNEL_ID.
+	ChannelID string
+	// Token is the bot's token, TWR_DISCORD_BOT_TOKEN, radio's name for the
+	// shared Secret (paddock ADR 0010, point 2). It is never logged.
+	Token string
+	// Pitwall is the pit wall's base URL each card links to, TWR_PITWALL_URL;
+	// empty is no link.
+	Pitwall string
 }
+
+// The sinks TWR_PODIUM_SINK names.
+const (
+	SinkDiscord = "discord"
+	SinkConsole = "console"
+)
 
 // ConfigFromEnv reads the configuration through getenv, which is os.Getenv outside
 // the tests. An unset or empty variable takes its default; a value that can't be
@@ -39,6 +72,31 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("LOG_LEVEL: %w", err)
 		}
 	}
+	cfg.Sink, cfg.Src = SinkDiscord, "live"
+	if s := getenv("TWR_PODIUM_SINK"); s != "" {
+		cfg.Sink = s
+	}
+	if s := getenv("TWR_PODIUM_SRC"); s != "" {
+		cfg.Src = s
+	}
+	cfg.NATSURL = getenv("TWR_NATS_URL")
+	cfg.ChannelID = getenv("TWR_DISCORD_RESULTS_CHANNEL_ID")
+	cfg.Token = getenv("TWR_DISCORD_BOT_TOKEN")
+	cfg.Pitwall = getenv("TWR_PITWALL_URL")
+	switch cfg.Sink {
+	case SinkConsole:
+		cfg.Cards = true
+	case SinkDiscord:
+		cfg.Cards = cfg.ChannelID != ""
+		if cfg.Cards && cfg.Token == "" {
+			return Config{}, errors.New("TWR_DISCORD_BOT_TOKEN: posting to TWR_DISCORD_RESULTS_CHANNEL_ID needs the bot's token")
+		}
+	default:
+		return Config{}, fmt.Errorf("TWR_PODIUM_SINK: %q is not discord or console", cfg.Sink)
+	}
+	if cfg.Cards && cfg.NATSURL == "" {
+		return Config{}, errors.New("TWR_NATS_URL: posting cards needs the NATS server")
+	}
 	return cfg, nil
 }
 
@@ -49,13 +107,18 @@ func NewLogger(w io.Writer, level slog.Level) *slog.Logger {
 }
 
 // Handler serves the health endpoint, GET /healthz, which answers 200 with the
-// service's version while the process can serve requests.
-func Handler(version string) http.Handler {
+// service's version while the process can serve requests, and GET /metrics,
+// the cards' counter in Prometheus's text format (paddock#67, R5).
+func Handler(version string, counters *cards.Counters) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// An error here is the client gone; there is no one left to tell.
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": version})
+	})
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = counters.WriteTo(w)
 	})
 	return mux
 }
@@ -76,15 +139,84 @@ const (
 )
 
 // Run listens on cfg.Addr and serves Handler until ctx is done, then shuts the
-// server down gracefully. It returns nil after a clean shutdown, or why it could
-// not listen or serve.
+// server down gracefully, posting the cards meanwhile when cfg.Cards is set. It
+// returns nil after a clean shutdown, or why it could not listen, serve or
+// post.
 func Run(ctx context.Context, cfg Config, logger *slog.Logger, version string) error {
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", cfg.Addr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	return serve(ctx, ln, logger, version)
+	counters := &cards.Counters{}
+	if !cfg.Cards {
+		// R7: no results channel, no consumer.
+		logger.InfoContext(ctx, "cards off: TWR_DISCORD_RESULTS_CHANNEL_ID is not set")
+		return serve(ctx, ln, logger, version, counters)
+	}
+	nc, err := nats.Connect(cfg.NATSURL, nats.Name("podium"), nats.MaxReconnects(-1))
+	if err != nil {
+		_ = ln.Close()
+		return fmt.Errorf("nats: %w", err)
+	}
+	defer nc.Close()
+	parent := ctx
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	posting, err := startCards(ctx, nc, cfg, logger, counters)
+	if err != nil {
+		_ = ln.Close()
+		return err
+	}
+	go func() {
+		if err := <-posting; err != nil {
+			cancel(err)
+		}
+	}()
+	if err := serve(ctx, ln, logger, version, counters); err != nil {
+		return err
+	}
+	if parent.Err() != nil {
+		// Stopped from outside: a clean stop.
+		return nil
+	}
+	// The poster stopped the service.
+	return context.Cause(ctx)
+}
+
+// startCards starts posting the cards (internal/cards) on nc, and returns
+// where the poster's error arrives when it stops.
+func startCards(ctx context.Context, nc *nats.Conn, cfg Config, logger *slog.Logger,
+	counters *cards.Counters,
+) (<-chan error, error) {
+	js, err := jetstream.New(nc)
+	if err != nil {
+		return nil, fmt.Errorf("jetstream: %w", err)
+	}
+	kv, err := js.KeyValue(ctx, cards.Bucket)
+	if err != nil {
+		return nil, fmt.Errorf("KV bucket %s: %w", cards.Bucket, err)
+	}
+	var sender cards.Sender = sink.NewConsole(logWriter{logger})
+	if cfg.Sink == SinkDiscord {
+		sender = &discord.Poster{Token: cfg.Token, ChannelID: cfg.ChannelID, Logger: logger}
+	}
+	p := &cards.Poster{
+		JS: js, KV: kv, Src: cfg.Src, Sender: sender, Pitwall: cfg.Pitwall,
+		Counters: counters, Logger: logger,
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+	return done, nil
+}
+
+// logWriter writes the console sink's cards as log lines, so the service's
+// output stays one JSON object a line.
+type logWriter struct{ logger *slog.Logger }
+
+func (w logWriter) Write(b []byte) (int, error) {
+	w.logger.Info("card", "text", string(b)) //nolint:sloglint // no context: an io.Writer
+	return len(b), nil
 }
 
 // newServer is the HTTP server for h, with the limits above, logging its own errors
@@ -100,8 +232,8 @@ func newServer(h http.Handler, logger *slog.Logger) *http.Server {
 	}
 }
 
-func serve(ctx context.Context, ln net.Listener, logger *slog.Logger, version string) error {
-	srv := newServer(Handler(version), logger)
+func serve(ctx context.Context, ln net.Listener, logger *slog.Logger, version string, counters *cards.Counters) error {
+	srv := newServer(Handler(version, counters), logger)
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 	logger.InfoContext(ctx, "serving", "addr", ln.Addr().String(), "version", version)

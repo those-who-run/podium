@@ -20,8 +20,11 @@ A session with no full lap gets none.
 `podium card FILE` prints the card of each `session.ended` in `FILE` (`-` for
 standard input), as v1's `those-who-run post <id> --dry-run` did, and posts
 nothing. `FILE` holds the messages' bodies as the `EVENTS` stream stores them,
-one after another. `--pitwall URL`, by default `TWR_PITWALL_URL`, links each
-card's title to the session on the pit wall: `<URL>/?session=<sid>`.
+one after another. `podium card --sid SID` reads session `SID`'s
+`session.ended` from the `EVENTS` stream at `TWR_NATS_URL` instead, for the
+source `--src` (by default `TWR_PODIUM_SRC`, or `live`). `--pitwall URL`, by
+default `TWR_PITWALL_URL`, links each card's title to the session on the pit
+wall: `<URL>/?session=<sid>`.
 
 ```console
 $ podium card --pitwall http://pitwall.home.arpa ended.jsonl
@@ -35,8 +38,49 @@ http://pitwall.home.arpa/?session=01KDVDNA000ZB038PDRJACDC76
 A card goes to a sink ([`internal/sink`](internal/sink/sink.go)): the console,
 which needs no Discord, or the results channel through Discord's REST API
 ([`internal/discord`](internal/discord/discord.go)), with the bot token and no
-gateway session (paddock ADR 0010). Posting each session's card from the bus,
-exactly once, is paddock#67.
+gateway session (paddock ADR 0010).
+
+## Posting each card once
+
+The service posts the card of each session that ends
+([`internal/cards`](internal/cards/cards.go), paddock#67). A durable consumer,
+`cards-<src>`, reads `twr.v1.<src>.evt.*.session.ended` from `EVENTS`. For
+each session with a card, podium writes `posting` under `<src>.<sid>` in the
+`cards` KV bucket (a create-only write), sends the card, writes `posted` with
+the Discord message's id, publishes `twr.v1.<src>.evt.<sid>.card.posted`
+(`Nats-Msg-Id` `<src>:<sid>:card.posted:1`) for logbook, and acks. A
+`session.ended` that finds `posted` posts nothing, so one delivered again, or
+published again, posts no second card.
+
+- **Retries, as v1:** three attempts, waiting 2 s then 4 s, or as long as a
+  rate limit asks. A refused token, a missing channel or a missing permission
+  (401, 403, 404) is tried once and logged with the hint to check the channel
+  id and the bot's permissions. A card that fails is counted `failed`, loses
+  its `posting` record, and never stops the next.
+- **A poster stopped mid-post:** a `posting` record under a minute old is a
+  poster still at it, and the `session.ended` waits. An older one is checked
+  against the channel's latest 50 messages, by the card's pit wall link (or its
+  title and start): found, it is recorded as `posted` and not sent again; not
+  found, it is sent. When the channel can't be read, podium errs on the side
+  of a missed card rather than a double one, logs a warning, and counts it
+  `failed`: a missed card can be posted again by hand, while a double card is
+  what this exists to prevent. Reading the channel needs the bot's **Read
+  Message History** permission, beside View Channel, Send Messages and Embed
+  Links.
+- **No full lap:** no card and no record, counted `skipped`.
+- **The metric:** `GET /metrics` serves `gt7_results_posts_total{result}`
+  (`ok`, `failed`, `skipped`), v1's series under its v1 name.
+
+Its settings:
+
+| Variable | What | Default |
+| --- | --- | --- |
+| `TWR_PODIUM_SINK` | `discord`, or `console`, which writes each card to the log | `discord` |
+| `TWR_DISCORD_RESULTS_CHANNEL_ID` | The results channel. Unset with the `discord` sink turns cards off: no consumer, nothing posted (as v1) | unset |
+| `TWR_DISCORD_BOT_TOKEN` | The bot's token, radio's name for the shared Secret; needed with a channel | unset |
+| `TWR_PITWALL_URL` | The pit wall's base URL each card's title links to | no link |
+| `TWR_PODIUM_SRC` | The source whose sessions it posts | `live` |
+| `TWR_NATS_URL` | The NATS server; needed when cards are on | unset |
 
 ## Checks
 
@@ -51,11 +95,11 @@ The ones every Go component shares, from the
 - **Configuration from the environment**, read once at start-up into a typed
   struct; an unset variable takes its default and a value that can't be read
   stops the process. The service reads `ADDR` (`:8080`) and
-  `LOG_LEVEL` (`info`).
+  `LOG_LEVEL` (`info`), and the cards' settings above.
 - **Logging with `log/slog`, as JSON** on standard output, one object per line,
   with key-value pairs.
 - **A health endpoint**, `GET /healthz`, which answers 200 while the process can
-  serve.
+  serve, and its metrics, `GET /metrics`.
 
 ## From the template
 

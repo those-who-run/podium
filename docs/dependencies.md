@@ -27,5 +27,6 @@ the test reads.
 
 | Module | Why |
 | --- | --- |
-| `github.com/those-who-run/contracts` | The `SessionEnded` message a card is built from (paddock ADR 0002), and its `format` package, which writes the card's times and fuel figures as the pit wall does (paddock#128). |
+| `github.com/nats-io/nats.go` | The NATS client: the durable consumer of `session.ended`, the `cards` KV bucket and `card.posted` (paddock#67), and `podium card --sid`. The client ecu and logbook use, at their version. |
+| `github.com/those-who-run/contracts` | The `SessionEnded` message a card is built from (paddock ADR 0002), `CardPosted` and the `cards` bucket's `CardRecord` (paddock#67), and its `format` package, which writes the card's times and fuel figures as the pit wall does (paddock#128). |
 | `google.golang.org/protobuf` | The runtime the contracts' generated code is written for; the tests build messages with its helpers (`proto.Clone`, `timestamppb`). |

@@ -153,6 +153,88 @@ func (p *Poster) Send(ctx context.Context, c card.Card) (string, error) {
 	return sent.ID, nil
 }
 
+// recent is how many of the channel's latest messages Find reads: Discord's
+// most for one request.
+const recent = 50
+
+// Find looks for c among the channel's latest 50 messages, for a card whose
+// post may have been cut short after the send (paddock#67, R3). A message
+// matches when one of its embeds links to c's URL, or, for a card with no
+// link, has no link and c's title and timestamp. It returns the message's id and true when
+// one matches. Reading the channel needs the bot's Read Message History
+// permission there; without it Find returns a StatusError (403).
+func (p *Poster) Find(ctx context.Context, c card.Card) (string, bool, error) {
+	if p.Token == "" || p.ChannelID == "" {
+		return "", false, errors.New("discord: reading the channel needs a bot token and a channel id")
+	}
+	base := p.BaseURL
+	if base == "" {
+		base = DefaultBaseURL
+	}
+	url := strings.TrimRight(base, "/") + "/channels/" + p.ChannelID + "/messages?limit=" + strconv.Itoa(recent)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", false, fmt.Errorf("discord: %w", err)
+	}
+	req.Header.Set("Authorization", "Bot "+p.Token)
+	req.Header.Set("User-Agent", userAgent)
+	client := p.HTTP
+	if client == nil {
+		client = &http.Client{Timeout: timeout}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", false, fmt.Errorf("discord: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	// 50 messages with their embeds are well under a megabyte.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		e := &StatusError{Status: resp.StatusCode, Body: strings.TrimSpace(string(data[:min(len(data), maxBody)]))}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			e.RetryAfter = retryAfter(resp.Header.Get("Retry-After"), data)
+		}
+		return "", false, e
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("discord: reading the channel: %w", err)
+	}
+	var messages []struct {
+		ID     string  `json:"id"`
+		Embeds []Embed `json:"embeds"`
+	}
+	if err := json.Unmarshal(data, &messages); err != nil {
+		return "", false, fmt.Errorf("discord: the channel's messages are unreadable: %w", err)
+	}
+	want := EmbedOf(c)
+	for _, m := range messages {
+		for _, e := range m.Embeds {
+			if same(e, want) {
+				return m.ID, true, nil
+			}
+		}
+	}
+	return "", false, nil
+}
+
+// same is whether embed e, as Discord returns it, is the card want: the same
+// link, or with no link the same title and timestamp. Discord may write the
+// timestamp in another form (+00:00 for Z), so it is compared as a time.
+func same(e, want Embed) bool {
+	if want.URL != "" {
+		return e.URL == want.URL
+	}
+	if e.URL != "" || e.Title != want.Title {
+		return false
+	}
+	if want.Timestamp == "" {
+		return e.Timestamp == ""
+	}
+	got, err1 := time.Parse(time.RFC3339Nano, e.Timestamp)
+	wanted, err2 := time.Parse(time.RFC3339Nano, want.Timestamp)
+	return err1 == nil && err2 == nil && got.Equal(wanted)
+}
+
 // retryAfter is the wait a 429 asks for: the Retry-After header's seconds, else
 // the JSON body's retry_after (seconds, with a fraction). Zero when neither
 // reads as a wait.
