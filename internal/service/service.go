@@ -180,6 +180,10 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger, version string) e
 		}
 	}()
 	err = serve(ctx, ln, logger, version, counters)
+	if err != nil {
+		// Stop the poster too, which a failed server leaves running.
+		cancel(err)
+	}
 	// Let a card in flight finish its record before the connection closes.
 	select {
 	case <-posterDone:

@@ -331,13 +331,16 @@ func TestRetriesAsV1(t *testing.T) {
 		sends int
 		waits []time.Duration
 		ok    bool
+		maybe bool // whether a failed attempt may have reached the channel
 	}{
-		{"twice then posted", []int{500, 502}, 3, []time.Duration{2 * time.Second, 4 * time.Second}, true},
-		{"three times", []int{500, 500, 500}, 3, []time.Duration{2 * time.Second, 4 * time.Second}, false},
-		{"rate limited", []int{429}, 2, []time.Duration{1500 * time.Millisecond}, true},
-		{"rate limited for long", []int{-429}, 2, []time.Duration{maxWait}, true},
-		{"forbidden", []int{403}, 1, nil, false},
-		{"no channel", []int{404}, 1, nil, false},
+		{"twice then posted", []int{500, 502}, 3, []time.Duration{2 * time.Second, 4 * time.Second}, true, true},
+		{"three times", []int{500, 500, 500}, 3, []time.Duration{2 * time.Second, 4 * time.Second}, false, true},
+		{"rate limited", []int{429}, 2, []time.Duration{1500 * time.Millisecond}, true, false},
+		{"rate limited for long", []int{-429}, 2, []time.Duration{maxWait}, true, false},
+		{"rate limited three times", []int{429, 429, 429}, 3, []time.Duration{1500 * time.Millisecond, 1500 * time.Millisecond}, false, false},
+		{"forbidden", []int{403}, 1, nil, false, false},
+		{"a 502, then forbidden", []int{502, 403}, 2, []time.Duration{2 * time.Second}, false, true},
+		{"no channel", []int{404}, 1, nil, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var sends int
@@ -366,10 +369,11 @@ func TestRetriesAsV1(t *testing.T) {
 					return nil
 				},
 			}
-			id, err := p.attempt(t.Context(), slog.New(slog.DiscardHandler), "n", card.Card{Title: "T"})
-			if (err == nil) != c.ok || (c.ok && id != "7") || sends != c.sends || fmt.Sprint(waits) != fmt.Sprint(c.waits) {
-				t.Errorf("%q, %v after %d sends and waits %v; want ok %v after %d sends and waits %v",
-					id, err, sends, waits, c.ok, c.sends, c.waits)
+			id, maybe, err := p.attempt(t.Context(), slog.New(slog.DiscardHandler), "n", card.Card{Title: "T"})
+			if (err == nil) != c.ok || (c.ok && id != "7") || sends != c.sends || fmt.Sprint(waits) != fmt.Sprint(c.waits) ||
+				maybe != c.maybe {
+				t.Errorf("%q, maybe taken %v, %v after %d sends and waits %v; want ok %v, maybe taken %v after %d sends and waits %v",
+					id, maybe, err, sends, waits, c.ok, c.maybe, c.sends, c.waits)
 			}
 		})
 	}
@@ -681,5 +685,52 @@ func TestALostAnswerPostsOneCard(t *testing.T) {
 	created, _ := discord.Created("1000")
 	if rec.GetState() != statev1.CardState_CARD_STATE_POSTED || rec.GetMessageId() != "1000" || !rec.GetAt().AsTime().Equal(created) {
 		t.Errorf("the record is %v, want posted as 1000 at %v", rec, created)
+	}
+}
+
+// The re-review of podium#19: a send that times out after Discord stored the
+// card, then two 502s, keeps the posting record and is delivered again later,
+// to go through Find; nothing is counted failed. A card every attempt of which
+// Discord refused with a 4xx loses its record and is counted failed.
+func TestATimeoutThenGatewayErrorsKeepsTheRecord(t *testing.T) {
+	js, kv := natstest.Start(t)
+	log := slog.New(slog.DiscardHandler)
+	c := card.Card{Title: "T"}
+	p := newPoster(t, js, kv, &fakeDiscord{})
+	sends := 0
+	p.Sender = senderFunc(func(context.Context, string, card.Card) (string, error) {
+		sends++
+		if sends == 1 {
+			return "", errors.New("discord: context deadline exceeded")
+		}
+		return "", &discord.StatusError{Status: http.StatusBadGateway}
+	})
+	var later *laterError
+	if err := p.post(t.Context(), log, "timeout", c); !errors.As(err, &later) || sends != attempts || p.Counters.Get(Failed) != 0 {
+		t.Errorf("timeout, then 502, then 502: %v after %d sends, %d failed; want later, %d sends, none failed",
+			err, sends, p.Counters.Get(Failed), attempts)
+	}
+	if rec := record(t, kv, "timeout"); rec.GetState() != statev1.CardState_CARD_STATE_POSTING {
+		t.Errorf("the record is %v, want posting kept", rec)
+	}
+
+	p.Sender = senderFunc(func(context.Context, string, card.Card) (string, error) {
+		return "", &discord.StatusError{Status: http.StatusTooManyRequests, RetryAfter: time.Second}
+	})
+	if err := p.post(t.Context(), log, "refused", c); !errors.Is(err, errGivenUp) || p.Counters.Get(Failed) != 1 {
+		t.Errorf("three 429s: %v, %d failed; want given up, 1 failed", err, p.Counters.Get(Failed))
+	}
+	if _, err := kv.Get(t.Context(), Key(src, "refused")); !errors.Is(err, jetstream.ErrKeyNotFound) {
+		t.Errorf("the refused card's record: %v, want none", err)
+	}
+}
+
+// A rate limit on reading the channel is waited out for at most maxWait,
+// since every card queues behind it.
+func TestRetryLaterIsCapped(t *testing.T) {
+	var later *laterError
+	if !errors.As(retryLater(&discord.StatusError{Status: http.StatusTooManyRequests, RetryAfter: 24 * time.Hour}), &later) ||
+		later.delay != maxWait {
+		t.Errorf("a 24 h Retry-After waits %v, want %v", later.delay, maxWait)
 	}
 }

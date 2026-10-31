@@ -225,13 +225,14 @@ func (e *laterError) Error() string { return fmt.Sprintf("later, in %s: %v", e.d
 
 func (e *laterError) Unwrap() error { return e.err }
 
-// retryLater is a laterError for err: after the wait a rate limit asks for,
+// retryLater is a laterError for err: after the wait a rate limit asks for, up
+// to maxWait, so the cards queued behind it (one at a time) wait no longer,
 // else once a posting record would be stale.
 func retryLater(err error) error {
 	delay := stale
 	var status *discord.StatusError
 	if errors.As(err, &status) && status.RetryAfter > 0 {
-		delay = status.RetryAfter
+		delay = min(status.RetryAfter, maxWait)
 	}
 	return &laterError{delay: delay, err: err}
 }
@@ -328,19 +329,19 @@ func (p *Poster) post(ctx context.Context, log *slog.Logger, sid string, c card.
 	return p.send(ctx, log, key, sid, rev, c)
 }
 
-// send sends c with v1's retries, then records it as posted. A card Discord
-// refused (its last error a StatusError) loses its posting record, so a later
-// post by hand can try again, and is counted failed. One whose last send
-// failed on the way (a timeout, a reset), which Discord may have taken, keeps
-// its record and is delivered again later, to go through Find.
+// send sends c with v1's retries, then records it as posted. A card every
+// attempt of which Discord refused with a 4xx loses its posting record, so a
+// later post by hand can try again, and is counted failed. One with any
+// attempt that failed on the way (a timeout, a reset) or with a 5xx, which
+// Discord may have taken, keeps its record and is delivered again later, to
+// go through Find.
 func (p *Poster) send(ctx context.Context, log *slog.Logger, key, sid string, rev uint64, c card.Card) error {
-	id, err := p.attempt(ctx, log, Nonce(p.Src, sid), c)
+	id, maybeTaken, err := p.attempt(ctx, log, Nonce(p.Src, sid), c)
 	if err != nil {
 		if ctx.Err() != nil {
 			return errStopped
 		}
-		var status *discord.StatusError
-		if !errors.As(err, &status) {
+		if maybeTaken {
 			log.WarnContext(ctx, "card maybe posted: looking in the channel later", "err", err)
 			return retryLater(err)
 		}
@@ -360,20 +361,24 @@ func (p *Poster) send(ctx context.Context, log *slog.Logger, key, sid string, re
 
 // attempt sends c up to three times, waiting 2 s then 4 s between attempts, or
 // as long as a rate limit asks, up to maxWait; a refusal no retry can fix (401,
-// 403, 404) is tried once. Every attempt carries nonce.
-func (p *Poster) attempt(ctx context.Context, log *slog.Logger, nonce string, c card.Card) (string, error) {
+// 403, 404) is tried once. Every attempt carries nonce. maybeTaken says whether
+// any failed attempt may have reached the channel: one that failed on the way
+// (a timeout, a reset) or with a 5xx, which a gateway can answer for a message
+// Discord stored. Only a 4xx is sure to have posted nothing.
+func (p *Poster) attempt(ctx context.Context, log *slog.Logger, nonce string, c card.Card) (id string, maybeTaken bool, err error) {
 	wait := backoff
-	var err error
 	for n := 1; n <= attempts; n++ {
-		var id string
 		if id, err = p.Sender.Send(ctx, nonce, c); err == nil {
-			return id, nil
+			return id, maybeTaken, nil
 		}
 		var status *discord.StatusError
-		if errors.As(err, &status) && status.Permanent() {
+		if !errors.As(err, &status) || status.Status >= 500 {
+			maybeTaken = true
+		}
+		if status != nil && status.Permanent() {
 			log.ErrorContext(ctx, "card not posted: check the channel id and the bot's permissions "+
 				"(View Channel, Send Messages, Embed Links)", "err", err)
-			return "", err
+			return "", maybeTaken, err
 		}
 		if n == attempts || ctx.Err() != nil {
 			break
@@ -383,13 +388,13 @@ func (p *Poster) attempt(ctx context.Context, log *slog.Logger, nonce string, c 
 			d = min(status.RetryAfter, maxWait)
 		}
 		log.WarnContext(ctx, "card not posted: trying again", "attempt", n, "wait", d.String(), "err", err)
-		if err := p.pause(ctx, d); err != nil {
-			return "", err
+		if perr := p.pause(ctx, d); perr != nil {
+			return "", maybeTaken, perr
 		}
 		wait *= 2
 	}
 	log.ErrorContext(ctx, "card not posted", "attempts", attempts, "err", err)
-	return "", err
+	return "", maybeTaken, err
 }
 
 // posted records the card as posted at at, publishes card.posted, and counts
