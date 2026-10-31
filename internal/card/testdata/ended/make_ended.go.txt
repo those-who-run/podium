@@ -11,6 +11,11 @@
 // real-nuc-suzuka-before-restart-2026-10-18 to a graceful stop, then a new
 // machine continuing the session from the record it left, through
 // real-nuc-suzuka-joined-mid-race-2026-10-18, 8.7 s later.
+//
+// real-nuc-suzuka-qualifying-2026-10-31.jsonl, a ranked session (contracts
+// v0.2.7), was made the same way from ecu's ranked kind (paddock#146), with that
+// name alone in the list: the fixture is ecu's
+// internal/race/testdata/sessions/real-nuc-suzuka-qualifying-2026-10-31.jsonl.gz.
 
 package race
 

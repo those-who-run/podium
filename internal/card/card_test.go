@@ -245,6 +245,7 @@ func TestKindLabel(t *testing.T) {
 		{eventsv1.SessionType_SESSION_TYPE_LAP_RACE, 5, "5-lap race"},
 		{eventsv1.SessionType_SESSION_TYPE_TIMED_FIELD, 0, "timed race"},
 		{eventsv1.SessionType_SESSION_TYPE_SOLO_TIMED, 0, "time trial"},
+		{eventsv1.SessionType_SESSION_TYPE_RANKED, 0, "qualifying or practice"},
 		{eventsv1.SessionType_SESSION_TYPE_SOLO_LAPS, 3, "3-lap run"},
 		{eventsv1.SessionType_SESSION_TYPE_UNKNOWN, 0, "session"},
 		{eventsv1.SessionType_SESSION_TYPE_UNSPECIFIED, 0, "session"},

@@ -209,3 +209,25 @@ func hasField(c Card, name, value string) bool {
 	}
 	return false
 }
+
+// A ranked session (contracts v0.2.7, the maintainer's decision of 2026-10-31):
+// the maintainer's qualifying at Suzuka on 2026-10-31 evening, two laps and back
+// to the pits, P7 of 16, which v1 called a timed race. Its session.ended is ecu's
+// (testdata/ended/real-nuc-suzuka-qualifying-2026-10-31.jsonl, made as
+// make_ended.go.txt says, from ecu's ranked kind branch on its fixture).
+func TestARankedSessionsCard(t *testing.T) {
+	ended := endedOf(t, "real-nuc-suzuka-qualifying-2026-10-31")
+	if len(ended) != 1 || ended[0].GetSummary().GetSessionType() != eventsv1.SessionType_SESSION_TYPE_RANKED {
+		t.Fatalf("want one ranked session, got %v", ended)
+	}
+	c, ok := Build(ended[0], pitwall)
+	if !ok {
+		t.Fatal("no card")
+	}
+	if c.Title != "Suzuka Circuit · qualifying or practice" {
+		t.Errorf("title %q", c.Title)
+	}
+	if want := "2 laps, P7 of 16"; c.Description != want && !strings.HasPrefix(c.Description, want) {
+		t.Errorf("result %q, want %q", c.Description, want)
+	}
+}
