@@ -251,7 +251,9 @@ func TrackLabel(t *eventsv1.TrackVerdict) string {
 }
 
 // KindLabel is the card's kind of session, from ecu's verdict on it (kind) and
-// the laps the race runs: "6-lap race", "timed race", "time trial", "3-lap run".
+// the laps the race runs: "6-lap race", "timed race", "time trial", "3-lap run",
+// and "qualifying or practice" for a session ranked by lap time with a field
+// (contracts v0.2.7's SESSION_TYPE_RANKED; telemetry can't tell the two apart).
 // A kind ecu could not tell is "session" (the package doc says why).
 func KindLabel(kind eventsv1.SessionType, totalLaps int) string {
 	switch kind {
@@ -259,6 +261,8 @@ func KindLabel(kind eventsv1.SessionType, totalLaps int) string {
 		return fmt.Sprintf("%d-lap race", totalLaps)
 	case eventsv1.SessionType_SESSION_TYPE_TIMED_FIELD:
 		return "timed race"
+	case eventsv1.SessionType_SESSION_TYPE_RANKED:
+		return "qualifying or practice"
 	case eventsv1.SessionType_SESSION_TYPE_SOLO_TIMED:
 		return "time trial"
 	case eventsv1.SessionType_SESSION_TYPE_SOLO_LAPS:
