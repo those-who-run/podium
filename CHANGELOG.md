@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.2](https://github.com/those-who-run/podium/compare/v0.1.1...v0.1.2) (2026-10-31)
+
+
+### Features
+
+* **cards:** post each card once, with posted sessions kept in KV ([#17](https://github.com/those-who-run/podium/issues/17)) ([d353058](https://github.com/those-who-run/podium/commit/d353058e93f07533af92a06b09cb14cbfdd1edfb))
+
+
+### Bug Fixes
+
+* **cards:** the review of podium[#17](https://github.com/those-who-run/podium/issues/17): nonce, new sessions only, Find's errors ([#19](https://github.com/those-who-run/podium/issues/19)) ([dd96977](https://github.com/those-who-run/podium/commit/dd96977a99a84e973ddb38d67a7d377be02c48d9))
+
 ## [0.1.1](https://github.com/those-who-run/podium/compare/v0.1.0...v0.1.1) (2026-10-31)
 
 
