@@ -44,7 +44,7 @@ func fake(t *testing.T, status int, body string) (*httptest.Server, *[]*http.Req
 func TestPostSendsTheEmbed(t *testing.T) {
 	srv, reqs, sent := fake(t, http.StatusOK, `{"id": "1300000000000000001"}`)
 	p := &Poster{BaseURL: srv.URL + "/", Token: "tok", ChannelID: "42"}
-	id, err := p.Send(t.Context(), testCard)
+	id, err := p.Send(t.Context(), "", testCard)
 	if err != nil || id != "1300000000000000001" {
 		t.Fatalf("%q, %v", id, err)
 	}
@@ -82,7 +82,7 @@ func TestAFailureSaysWhetherARetryCanHelp(t *testing.T) {
 		http.StatusTooManyRequests: false, http.StatusInternalServerError: false, http.StatusBadGateway: false,
 	} {
 		srv, _, _ := fake(t, status, `{"message": "Missing Access", "code": 50001}`+"\n")
-		_, err := (&Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}).Send(t.Context(), testCard)
+		_, err := (&Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}).Send(t.Context(), "", testCard)
 		var se *StatusError
 		if !errors.As(err, &se) || se.Status != status || se.Permanent() != permanent {
 			t.Errorf("%d: %v, want a StatusError, permanent %v", status, err, permanent)
@@ -95,19 +95,19 @@ func TestAFailureSaysWhetherARetryCanHelp(t *testing.T) {
 }
 
 func TestOtherFailures(t *testing.T) {
-	if _, err := (&Poster{ChannelID: "42"}).Send(t.Context(), testCard); err == nil {
+	if _, err := (&Poster{ChannelID: "42"}).Send(t.Context(), "", testCard); err == nil {
 		t.Error("no token: no error")
 	}
-	if _, err := (&Poster{Token: "tok"}).Send(t.Context(), testCard); err == nil {
+	if _, err := (&Poster{Token: "tok"}).Send(t.Context(), "", testCard); err == nil {
 		t.Error("no channel: no error")
 	}
 	srv, _, _ := fake(t, http.StatusOK, `{"id": "1"}`)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := (&Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}).Send(ctx, testCard); err == nil {
+	if _, err := (&Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}).Send(ctx, "", testCard); err == nil {
 		t.Error("cancelled: no error")
 	}
-	if _, err := (&Poster{BaseURL: "http://\x7f", Token: "tok", ChannelID: "42"}).Send(t.Context(), testCard); err == nil {
+	if _, err := (&Poster{BaseURL: "http://\x7f", Token: "tok", ChannelID: "42"}).Send(t.Context(), "", testCard); err == nil {
 		t.Error("a bad URL: no error")
 	}
 }
@@ -120,7 +120,7 @@ func TestASentMessageWithAnUnreadableAnswerIsPosted(t *testing.T) {
 		srv, reqs, _ := fake(t, http.StatusOK, body)
 		var log bytes.Buffer
 		p := &Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42", Logger: slog.New(slog.NewJSONHandler(&log, nil))}
-		id, err := p.Send(t.Context(), testCard)
+		id, err := p.Send(t.Context(), "", testCard)
 		if err != nil || id != "" || len(*reqs) != 1 {
 			t.Errorf("%s: %q, %v after %d requests; want no id, no error, one request", body, id, err, len(*reqs))
 		}
@@ -150,7 +150,7 @@ func TestARateLimitCarriesItsWait(t *testing.T) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = io.WriteString(w, tc.body)
 		}))
-		_, err := (&Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}).Send(t.Context(), testCard)
+		_, err := (&Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}).Send(t.Context(), "", testCard)
 		srv.Close()
 		var se *StatusError
 		if !errors.As(err, &se) || se.RetryAfter != tc.want || se.Permanent() {
@@ -159,9 +159,39 @@ func TestARateLimitCarriesItsWait(t *testing.T) {
 	}
 	// Only a 429's wait is read.
 	srv, _, _ := fake(t, http.StatusInternalServerError, `{"retry_after": 3}`)
-	_, err := (&Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}).Send(t.Context(), testCard)
+	_, err := (&Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}).Send(t.Context(), "", testCard)
 	var se *StatusError
 	if !errors.As(err, &se) || se.RetryAfter != 0 {
 		t.Errorf("a 500: %v", err)
+	}
+}
+
+// paddock#67: a nonce goes with enforce_nonce, so Discord takes a send it has
+// already had as that message; one longer than Discord's 25 is refused.
+func TestSendCarriesTheNonce(t *testing.T) {
+	srv, _, sent := fake(t, http.StatusOK, `{"id": "1"}`)
+	p := &Poster{BaseURL: srv.URL, Token: "tok", ChannelID: "42"}
+	if _, err := p.Send(t.Context(), "ABCDEFGHIJKLMNOPQRSTUVWXY", testCard); err != nil {
+		t.Fatal(err)
+	}
+	if m := (*sent)[0]; m["nonce"] != "ABCDEFGHIJKLMNOPQRSTUVWXY" || m["enforce_nonce"] != true {
+		t.Errorf("sent %v", m)
+	}
+	if _, err := p.Send(t.Context(), strings.Repeat("A", 26), testCard); err == nil || len(*sent) != 1 {
+		t.Errorf("a 26-character nonce: %v", err)
+	}
+}
+
+// A snowflake's time is its top 42 bits, in milliseconds since 2015.
+func TestCreated(t *testing.T) {
+	// 175928847299117063 is Discord's own example, 2016-04-30 11:18:25.796 UTC.
+	at, ok := Created("175928847299117063")
+	if !ok || !at.Equal(time.Date(2016, 4, 30, 11, 18, 25, 796_000_000, time.UTC)) {
+		t.Errorf("Created = %v, %v", at, ok)
+	}
+	for _, bad := range []string{"", "0", "x"} {
+		if _, ok := Created(bad); ok {
+			t.Errorf("Created(%q) is a time", bad)
+		}
 	}
 }

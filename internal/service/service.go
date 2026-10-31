@@ -123,6 +123,10 @@ func Handler(version string, counters *cards.Counters) http.Handler {
 	return mux
 }
 
+// postGrace is how long Run waits, once the server has stopped, for a card in
+// flight to be recorded before it closes the NATS connection.
+const postGrace = 5 * time.Second
+
 // shutdownGrace is how long Run lets requests in flight finish once ctx is done.
 const shutdownGrace = 10 * time.Second
 
@@ -168,12 +172,25 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger, version string) e
 		_ = ln.Close()
 		return err
 	}
+	posterDone := make(chan struct{})
 	go func() {
+		defer close(posterDone)
 		if err := <-posting; err != nil {
 			cancel(err)
 		}
 	}()
-	if err := serve(ctx, ln, logger, version, counters); err != nil {
+	err = serve(ctx, ln, logger, version, counters)
+	if err != nil {
+		// Stop the poster too, which a failed server leaves running.
+		cancel(err)
+	}
+	// Let a card in flight finish its record before the connection closes.
+	select {
+	case <-posterDone:
+	case <-time.After(postGrace):
+		logger.WarnContext(ctx, "cards: stopped with a card in flight")
+	}
+	if err != nil {
 		return err
 	}
 	if parent.Err() != nil {

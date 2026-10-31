@@ -9,13 +9,17 @@
 // and acks. A session.ended that finds "posted" posts nothing. One that finds
 // "posting" written more than a minute before (a poster stopped between the
 // send and the record) asks the channel whether the card is there before it
-// sends again; when the channel can't be read it errs on the side of a missed
-// card rather than a double one, since the driver can post a missed card again
-// by hand but a double card is the failure this exists to prevent.
+// sends again; when the bot may not read the channel it errs on the side of a
+// missed card rather than a double one, since the driver can post a missed
+// card again by hand but a double card is the failure this exists to prevent.
+// Every send of a card carries the same nonce, so Discord takes a send it has
+// already had as that message.
 package cards
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base32"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -57,13 +61,28 @@ const stale = time.Minute
 
 // ackWait is how long the stream waits for an ack before it delivers a
 // session.ended again: longer than three attempts that each time out (30 s)
-// and the waits between them.
+// and the two waits between them, each at most maxWait.
 const ackWait = 5 * time.Minute
 
+// maxWait caps a wait between attempts, however long a rate limit asks for, so
+// a card's attempts end within ackWait and the stream doesn't hand the
+// session.ended to another delivery while it is still being sent.
+const maxWait = time.Minute
+
 // Sender sends a card and returns its message id, empty when it has none:
-// discord.Poster, or sink.Console for replays and tests.
+// discord.Poster, or sink.Console for replays and tests. nonce is the same for
+// every send of one session's card (Nonce), so Discord can take a send it has
+// already had as that message.
 type Sender interface {
-	Send(ctx context.Context, c card.Card) (string, error)
+	Send(ctx context.Context, nonce string, c card.Card) (string, error)
+}
+
+// Nonce is the nonce of a session's card: the first 25 characters of the
+// base32 of sha256("<src>:<sid>"), Discord's longest, so every send of one
+// card, from any delivery, carries the same one.
+func Nonce(src, sid string) string {
+	sum := sha256.Sum256([]byte(src + ":" + sid))
+	return base32.StdEncoding.EncodeToString(sum[:])[:discord.MaxNonce]
 }
 
 // Finder looks for a card already in the channel (discord.Poster). A Sender
@@ -122,7 +141,10 @@ func (p *Poster) Run(ctx context.Context) error {
 		Durable:       Consumer(p.Src),
 		Description:   "podium: the results card of each session (paddock#67)",
 		FilterSubject: "twr.v1." + p.Src + ".evt.*.session.ended",
-		DeliverPolicy: jetstream.DeliverAllPolicy,
+		// Only the sessions that end after the consumer is first made: a first
+		// start would otherwise post every card EVENTS still keeps (30 days).
+		// NATS can't change a durable's deliver policy later.
+		DeliverPolicy: jetstream.DeliverNewPolicy,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       wait,
 		// One card at a time, in order: a card is a few seconds' work.
@@ -174,9 +196,14 @@ func (p *Poster) Handle(ctx context.Context, msg jetstream.Msg) {
 		_ = msg.Ack()
 		return
 	}
-	switch err := p.post(ctx, log, sid, c); {
+	err := p.post(ctx, log, sid, c)
+	var later *laterError
+	switch {
 	case err == nil:
 		_ = msg.Ack()
+	case errors.As(err, &later):
+		// Discord asked for a wait, or couldn't be reached.
+		_ = msg.NakWithDelay(later.delay)
 	case errors.Is(err, errLater):
 		// Another poster may still be sending, or the record couldn't be
 		// read or written: try again once a stale record would be stale.
@@ -186,6 +213,28 @@ func (p *Poster) Handle(ctx context.Context, msg jetstream.Msg) {
 	default:
 		_ = msg.Ack()
 	}
+}
+
+// laterError is a session.ended to deliver again after delay.
+type laterError struct {
+	delay time.Duration
+	err   error
+}
+
+func (e *laterError) Error() string { return fmt.Sprintf("later, in %s: %v", e.delay, e.err) }
+
+func (e *laterError) Unwrap() error { return e.err }
+
+// retryLater is a laterError for err: after the wait a rate limit asks for, up
+// to maxWait, so the cards queued behind it (one at a time) wait no longer,
+// else once a posting record would be stale.
+func retryLater(err error) error {
+	delay := stale
+	var status *discord.StatusError
+	if errors.As(err, &status) && status.RetryAfter > 0 {
+		delay = min(status.RetryAfter, maxWait)
+	}
+	return &laterError{delay: delay, err: err}
 }
 
 var (
@@ -247,16 +296,29 @@ func (p *Poster) post(ctx context.Context, log *slog.Logger, sid string, c card.
 		return errGivenUp
 	}
 	id, found, err := finder.Find(ctx, c)
-	if err != nil {
+	var status *discord.StatusError
+	switch {
+	case err == nil:
+	case ctx.Err() != nil:
+		return errStopped
+	case errors.As(err, &status) && status.Permanent():
 		log.WarnContext(ctx, "card maybe posted by a poster that stopped, and the channel can't be read: "+
 			"not posting it again (a missed card rather than a double one). Check the bot's Read Message History permission",
 			"err", err)
 		p.Counters.add(Failed)
 		return errGivenUp
+	default:
+		// Discord down or rate limited: ask again later.
+		log.WarnContext(ctx, "cards: the channel can't be read now: looking again later", "err", err)
+		return retryLater(err)
 	}
 	if found {
 		log.InfoContext(ctx, "card found in the channel: recording it", "message_id", id)
-		return p.posted(ctx, log, key, sid, entry.Revision(), id)
+		at, ok := discord.Created(id)
+		if !ok {
+			at = p.clock()
+		}
+		return p.posted(ctx, log, key, sid, entry.Revision(), id, at)
 	}
 	rev, err := p.KV.Update(ctx, key, p.record(sid, statev1.CardState_CARD_STATE_POSTING, ""), entry.Revision())
 	if err != nil {
@@ -267,14 +329,21 @@ func (p *Poster) post(ctx context.Context, log *slog.Logger, sid string, c card.
 	return p.send(ctx, log, key, sid, rev, c)
 }
 
-// send sends c with v1's retries, then records it as posted. A card that
-// fails every attempt, or fails for good, loses its posting record, so a
-// later post by hand can try again, and is counted failed.
+// send sends c with v1's retries, then records it as posted. A card every
+// attempt of which Discord refused with a 4xx loses its posting record, so a
+// later post by hand can try again, and is counted failed. One with any
+// attempt that failed on the way (a timeout, a reset) or with a 5xx, which
+// Discord may have taken, keeps its record and is delivered again later, to
+// go through Find.
 func (p *Poster) send(ctx context.Context, log *slog.Logger, key, sid string, rev uint64, c card.Card) error {
-	id, err := p.attempt(ctx, log, c)
+	id, maybeTaken, err := p.attempt(ctx, log, Nonce(p.Src, sid), c)
 	if err != nil {
 		if ctx.Err() != nil {
 			return errStopped
+		}
+		if maybeTaken {
+			log.WarnContext(ctx, "card maybe posted: looking in the channel later", "err", err)
+			return retryLater(err)
 		}
 		if derr := p.KV.Delete(context.WithoutCancel(ctx), key, jetstream.LastRevision(rev)); derr != nil {
 			log.WarnContext(ctx, "cards: the posting record is left", "err", derr)
@@ -287,46 +356,50 @@ func (p *Poster) send(ctx context.Context, log *slog.Logger, key, sid string, re
 			return err
 		}
 	}
-	return p.posted(ctx, log, key, sid, rev, id)
+	return p.posted(ctx, log, key, sid, rev, id, p.clock())
 }
 
 // attempt sends c up to three times, waiting 2 s then 4 s between attempts, or
-// as long as a rate limit asks; a refusal no retry can fix (401, 403, 404) is
-// tried once.
-func (p *Poster) attempt(ctx context.Context, log *slog.Logger, c card.Card) (string, error) {
+// as long as a rate limit asks, up to maxWait; a refusal no retry can fix (401,
+// 403, 404) is tried once. Every attempt carries nonce. maybeTaken says whether
+// any failed attempt may have reached the channel: one that failed on the way
+// (a timeout, a reset) or with a 5xx, which a gateway can answer for a message
+// Discord stored. Only a 4xx is sure to have posted nothing.
+func (p *Poster) attempt(ctx context.Context, log *slog.Logger, nonce string, c card.Card) (id string, maybeTaken bool, err error) {
 	wait := backoff
-	var err error
 	for n := 1; n <= attempts; n++ {
-		var id string
-		if id, err = p.Sender.Send(ctx, c); err == nil {
-			return id, nil
+		if id, err = p.Sender.Send(ctx, nonce, c); err == nil {
+			return id, maybeTaken, nil
 		}
 		var status *discord.StatusError
-		if errors.As(err, &status) && status.Permanent() {
+		if !errors.As(err, &status) || status.Status >= 500 {
+			maybeTaken = true
+		}
+		if status != nil && status.Permanent() {
 			log.ErrorContext(ctx, "card not posted: check the channel id and the bot's permissions "+
 				"(View Channel, Send Messages, Embed Links)", "err", err)
-			return "", err
+			return "", maybeTaken, err
 		}
 		if n == attempts || ctx.Err() != nil {
 			break
 		}
 		d := wait
 		if errors.As(err, &status) && status.RetryAfter > 0 {
-			d = status.RetryAfter
+			d = min(status.RetryAfter, maxWait)
 		}
 		log.WarnContext(ctx, "card not posted: trying again", "attempt", n, "wait", d.String(), "err", err)
-		if err := p.pause(ctx, d); err != nil {
-			return "", err
+		if perr := p.pause(ctx, d); perr != nil {
+			return "", maybeTaken, perr
 		}
 		wait *= 2
 	}
 	log.ErrorContext(ctx, "card not posted", "attempts", attempts, "err", err)
-	return "", err
+	return "", maybeTaken, err
 }
 
-// posted records the card as posted, publishes card.posted, and counts it.
-func (p *Poster) posted(ctx context.Context, log *slog.Logger, key, sid string, rev uint64, id string) error {
-	at := p.clock()
+// posted records the card as posted at at, publishes card.posted, and counts
+// it.
+func (p *Poster) posted(ctx context.Context, log *slog.Logger, key, sid string, rev uint64, id string, at time.Time) error {
 	// The card is in the channel: the record is written even if the poster
 	// is stopping.
 	ctx = context.WithoutCancel(ctx)

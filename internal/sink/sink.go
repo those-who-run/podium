@@ -34,8 +34,9 @@ func NewConsole(w io.Writer) *Console {
 }
 
 // Send writes c, as Post does, and returns no message id: the console has
-// none. It is the poster's way in (paddock#67), as discord.Poster's Send is.
-func (s *Console) Send(ctx context.Context, c card.Card) (string, error) {
+// none, and no use for the nonce. It is the poster's way in (paddock#67), as
+// discord.Poster's Send is.
+func (s *Console) Send(ctx context.Context, _ string, c card.Card) (string, error) {
 	return "", s.Post(ctx, "", c)
 }
 
