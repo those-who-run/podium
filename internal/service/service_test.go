@@ -163,7 +163,7 @@ func TestNewLoggerWritesJSONFromItsLevel(t *testing.T) {
 
 func TestHealthz(t *testing.T) {
 	rec := httptest.NewRecorder()
-	Handler("1.2.3", nil).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	Handler("1.2.3", nil, nil).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -182,7 +182,7 @@ func TestHealthz(t *testing.T) {
 
 func TestHealthzIsGetOnly(t *testing.T) {
 	rec := httptest.NewRecorder()
-	Handler("1.2.3", nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/healthz", nil))
+	Handler("1.2.3", nil, nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/healthz", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST /healthz status = %d, want 405", rec.Code)
 	}
@@ -196,7 +196,7 @@ func TestRunServesUntilCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	var logs bytes.Buffer
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, ln, NewLogger(&logs, slog.LevelInfo), "test", nil) }()
+	go func() { done <- serve(ctx, ln, NewLogger(&logs, slog.LevelInfo), "test", nil, nil) }()
 
 	if code := get(t, "http://"+ln.Addr().String()+"/healthz"); code != http.StatusOK {
 		t.Errorf("GET /healthz status = %d", code)
@@ -287,7 +287,7 @@ func TestServeReportsAListenerThatFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = ln.Close() // Serve fails at once on a closed listener
-	err = serve(t.Context(), ln, NewLogger(io.Discard, slog.LevelInfo), "test", nil)
+	err = serve(t.Context(), ln, NewLogger(io.Discard, slog.LevelInfo), "test", nil, nil)
 	if err == nil || errors.Is(err, http.ErrServerClosed) {
 		t.Errorf("serve on a closed listener = %v, want an error", err)
 	}
@@ -397,7 +397,7 @@ func TestShutdownWaitsForServeToReturn(t *testing.T) {
 // before the first card.
 func TestMetrics(t *testing.T) {
 	rec := httptest.NewRecorder()
-	Handler("1.2.3", nil).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	Handler("1.2.3", nil, nil).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := rec.Body.String()
 	for _, want := range []string{
 		"# TYPE gt7_results_posts_total counter",
@@ -414,18 +414,38 @@ func TestMetrics(t *testing.T) {
 	}
 }
 
-// With cards on, a NATS server that can't be reached stops the service rather
-// than leaving it serving with no cards.
-func TestRunWithCardsReportsANATSItCannotReach(t *testing.T) {
-	gone, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+// paddock#340, AC2: until NATS's first connection, /healthz answers 503 with
+// why, so the pod isn't Ready; once made, 200.
+func TestHealthzWaitsForNATSFirstConnection(t *testing.T) {
+	var connected bool
+	h := Handler("1.2.3", nil, func() bool { return connected })
+	for _, c := range []struct {
+		connected bool
+		code      int
+		status    string
+	}{
+		{false, http.StatusServiceUnavailable, "waiting for NATS"},
+		{true, http.StatusOK, "ok"},
+	} {
+		connected = c.connected
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		var body map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != c.code || body["status"] != c.status || body["version"] != "1.2.3" {
+			t.Errorf("connected %v: /healthz is %d %v, want %d %q", c.connected, rec.Code, body, c.code, c.status)
+		}
 	}
-	url := "nats://" + gone.Addr().String()
-	_ = gone.Close()
-	cfg := Config{Addr: "127.0.0.1:0", Cards: true, Sink: SinkConsole, Src: "live", NATSURL: url}
-	err = Run(t.Context(), cfg, NewLogger(io.Discard, slog.LevelInfo), "test")
-	if err == nil || !strings.Contains(err.Error(), "nats") {
+}
+
+// With cards on, a NATS URL the client can't use at all still stops the
+// service: only a server that isn't up yet is waited for.
+func TestRunWithCardsReportsANATSURLItCannotUse(t *testing.T) {
+	cfg := Config{Addr: "127.0.0.1:0", Cards: true, Sink: SinkConsole, Src: "live", NATSURL: "nats://[::1"}
+	err := Run(t.Context(), cfg, NewLogger(io.Discard, slog.LevelInfo), "test")
+	if err == nil || !strings.HasPrefix(err.Error(), "nats: ") {
 		t.Errorf("Run = %v, want the NATS error", err)
 	}
 }

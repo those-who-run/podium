@@ -87,6 +87,11 @@ published again, posts no second card.
   hand, while a double card is what this exists to prevent. Reading the
   channel needs the bot's **Read Message History** permission, beside View
   Channel, Send Messages and Embed Links.
+- **Starting:** a NATS server that isn't up yet is waited for, not a restart:
+  the client keeps trying, and the cards start once it connects. Until that
+  first connection `GET /healthz` answers 503, `waiting for NATS`, so the pod
+  isn't Ready. After it, the client reconnects by itself and `/healthz` stays
+  200. `podium card` doesn't wait: with no server it fails at once.
 - **Stopping:** once the server has stopped, podium waits up to 5 s for a card
   in flight to be recorded before it closes its NATS connection.
 - **No full lap:** no card and no record, counted `skipped`.
@@ -121,7 +126,8 @@ The ones every Go component shares, from the
 - **Logging with `log/slog`, as JSON** on standard output, one object per line,
   with key-value pairs.
 - **A health endpoint**, `GET /healthz`, which answers 200 while the process can
-  serve, and its metrics, `GET /metrics`.
+  serve (with cards on, from NATS's first connection), and its metrics,
+  `GET /metrics`.
 
 ## From the template
 
