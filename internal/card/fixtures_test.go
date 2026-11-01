@@ -103,7 +103,7 @@ var accepted = map[string]map[int]struct {
 		1: {
 			heldMs: 3001,
 			why: "a held start (cars-on-track off on its first frame) starts at its first held frame " +
-				"(contracts v0.2.3, paddock#74), where v1's clock read the start check's verdict, 3 s later",
+				"(contracts v0.2.3, paddock#74), where v1's clock read the start check's verdict, 3.001 s later",
 		},
 	},
 }
@@ -137,6 +137,9 @@ func sameAsV1(t *testing.T, name string) []Card {
 		ms := int64(math.Round(float64(got.Timestamp.UnixNano()) / 1e6))
 		wantMs := int64(math.Round(w.started * 1000))
 		diff, ok := accepted[name][i+1]
+		if ok && diff.line == "" && diff.heldMs == 0 {
+			t.Fatalf("%s session %d: an accepted difference with neither a line nor heldMs (%s)", name, i+1, diff.why)
+		}
 		if ok && diff.heldMs != 0 {
 			if wantMs-ms != diff.heldMs {
 				t.Errorf("%s session %d: v1 started %d ms after v2, not the accepted %d ms (%s): change or remove it",
