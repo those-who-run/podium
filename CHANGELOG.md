@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/those-who-run/podium/compare/v0.1.3...v0.1.4) (2026-11-01)
+
+
+### Bug Fixes
+
+* **service:** wait for NATS's first connection instead of exiting ([#23](https://github.com/those-who-run/podium/issues/23)) ([1a0d957](https://github.com/those-who-run/podium/commit/1a0d95711a02284593e7c97b3a90507a532a9a64))
+
 ## [0.1.3](https://github.com/those-who-run/podium/compare/v0.1.2...v0.1.3) (2026-10-31)
 
 
