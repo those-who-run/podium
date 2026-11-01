@@ -1,0 +1,13 @@
+Unknown track · time trial
+http://pitwall.test/?session=20260101-000003
+1 lap
+  Best lap: 49.677 (lap 7)
+  Joined: on lap 7
+-- colour=0x333333 footer=Those Who Run 走り屋 timestamp=1767225603.001
+
+Unknown track · 2-lap race
+http://pitwall.test/?session=20260101-000158
+🚩 Finished P6 of 20 in 1:44.090
+  Best lap: 53.108 (lap 2)
+  Fuel used: 38%
+-- colour=0xD21F1B footer=Those Who Run 走り屋 timestamp=1767225718.986

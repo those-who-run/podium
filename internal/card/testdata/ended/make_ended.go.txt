@@ -16,6 +16,13 @@
 // v0.2.7), was made the same way from ecu's ranked kind (paddock#146), with that
 // name alone in the list: the fixture is ecu's
 // internal/race/testdata/sessions/real-nuc-suzuka-qualifying-2026-10-31.jsonl.gz.
+//
+// real-race-2laps-2026-10-14.jsonl, a practice then a race on one bus
+// (paddock#356), was made the same way from ecu at tag v0.1.16, where the
+// package is race/ at the module's root (drop this file into race/ and run
+// `go test ./race/`), with that name alone in the list: the recording is
+// salsa's testdata/v1/real-race-2laps-2026-10-14.jsonl.gz, the same file as
+// paddock's recordings/ keeps.
 
 package race
 
