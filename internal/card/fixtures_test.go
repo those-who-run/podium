@@ -15,7 +15,8 @@ import (
 
 // The cards are compared with what v1 1.0.0 posted for the same recordings
 // (paddock#66, AC1 to AC4). testdata/ended holds each recording's session.ended
-// events as ecu v0.1.11 published them (testdata/ended/make_ended.go.txt says how);
+// events as ecu published them, at v0.1.11 or the later tag make_ended.go.txt
+// names for the recording (testdata/ended/make_ended.go.txt says how);
 // testdata/v1 holds v1's `post --dry-run` of each session v1 let go of, in
 // order, with what the dry run doesn't print after it (testdata/v1/make_cards.py
 // says how). Both were made once and are kept.
@@ -83,14 +84,26 @@ var v1Link = regexp.MustCompile(`(?m)^(http://pitwall\.test/\?session=)\S+$`)
 // accepted are the known differences from v1's cards, each with its reason and
 // the decision behind it. v1's files stay as v1 made them; the line named here is
 // taken out of v1's card before the comparison, and the test fails if v1's card
-// no longer has it or v2's card has it too, so an entry never outlives its
-// difference.
-var accepted = map[string]map[int]struct{ line, why string }{
+// no longer has it or v2's card has it too; heldMs is how much later v1 dated
+// the card than v2, and the test fails unless it is exactly that, so an entry
+// never outlives its difference.
+var accepted = map[string]map[int]struct {
+	line   string
+	heldMs int64
+	why    string
+}{
 	"real-quali-restart-quit-2026-10-14": {
 		1: {
 			line: "  Best lap: 8:26.429 (lap 1)\n",
 			why: "the card shows ecu's best lap (the maintainer's decision, 2026-10-30): ecu leaves out laps " +
 				"that don't count for best, here lap 1, the only one timed, so the session has none",
+		},
+	},
+	"real-race-2laps-2026-10-14": {
+		1: {
+			heldMs: 3001,
+			why: "a held start (cars-on-track off on its first frame) starts at its first held frame " +
+				"(contracts v0.2.3, paddock#74), where v1's clock read the start check's verdict, 3.001 s later",
 		},
 	},
 }
@@ -121,7 +134,20 @@ func sameAsV1(t *testing.T, name string) []Card {
 		}
 		cards = append(cards, got)
 		wantText := v1Link.ReplaceAllString(w.text, "${1}"+e.GetSessionId())
-		if diff, ok := accepted[name][i+1]; ok {
+		ms := int64(math.Round(float64(got.Timestamp.UnixNano()) / 1e6))
+		wantMs := int64(math.Round(w.started * 1000))
+		diff, ok := accepted[name][i+1]
+		if ok && diff.line == "" && diff.heldMs == 0 {
+			t.Fatalf("%s session %d: an accepted difference with neither a line nor heldMs (%s)", name, i+1, diff.why)
+		}
+		if ok && diff.heldMs != 0 {
+			if wantMs-ms != diff.heldMs {
+				t.Errorf("%s session %d: v1 started %d ms after v2, not the accepted %d ms (%s): change or remove it",
+					name, i+1, wantMs-ms, diff.heldMs, diff.why)
+			}
+			wantMs -= diff.heldMs
+		}
+		if ok && diff.line != "" {
 			if !strings.Contains(wantText, diff.line) || strings.Contains(got.Text(), diff.line) {
 				t.Errorf("%s session %d: the accepted difference %q (%s) is gone: remove it",
 					name, i+1, diff.line, diff.why)
@@ -131,8 +157,7 @@ func sameAsV1(t *testing.T, name string) []Card {
 		if got.Text() != wantText {
 			t.Errorf("%s session %d:\n got: %s\nwant: %s", name, i+1, got.Text(), wantText)
 		}
-		ms := int64(math.Round(float64(got.Timestamp.UnixNano()) / 1e6))
-		if got.Colour != w.colour || got.Footer != w.footer || ms != int64(math.Round(w.started*1000)) {
+		if got.Colour != w.colour || got.Footer != w.footer || ms != wantMs {
 			t.Errorf("%s session %d: colour %06X, footer %q, started %d ms; v1 %06X, %q, %.3f s",
 				name, i+1, got.Colour, got.Footer, ms, w.colour, w.footer, w.started)
 		}
@@ -141,8 +166,8 @@ func sameAsV1(t *testing.T, name string) []Card {
 }
 
 // AC1: the finished race, the two stints, the time trial with the pit wall
-// link, the timed finish and the restart then quit give v1's cards, but for the
-// accepted differences.
+// link, the timed finish, the restart then quit, and a practice then a race on
+// one bus (paddock#356) give v1's cards, but for the accepted differences.
 func TestTheCardsAreV1s(t *testing.T) {
 	for _, name := range []string{
 		"real-nuc-suzuka-no-stop-2026-10-15",
@@ -150,6 +175,7 @@ func TestTheCardsAreV1s(t *testing.T) {
 		"real-nuc-fuji-timed-2026-10-15",
 		"real-nuc-suzuka-timed-race-2026-10-16",
 		"real-quali-restart-quit-2026-10-14",
+		"real-race-2laps-2026-10-14",
 	} {
 		t.Run(name, func(t *testing.T) { sameAsV1(t, name) })
 	}
