@@ -19,6 +19,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/those-who-run/podium/internal/card"
 	"github.com/those-who-run/podium/internal/cards"
 	"github.com/those-who-run/podium/internal/discord"
 	"github.com/those-who-run/podium/internal/sink"
@@ -84,6 +85,9 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	cfg.ChannelID = getenv("TWR_DISCORD_RESULTS_CHANNEL_ID")
 	cfg.Token = getenv("TWR_DISCORD_BOT_TOKEN")
 	cfg.Pitwall = getenv("TWR_PITWALL_URL")
+	if err := card.CheckPitwall(cfg.Pitwall); err != nil {
+		return Config{}, fmt.Errorf("TWR_PITWALL_URL: %w", err)
+	}
 	switch cfg.Sink {
 	case SinkConsole:
 		cfg.Cards = true

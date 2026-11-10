@@ -367,3 +367,21 @@ func TestTheRaceTimeCases(t *testing.T) {
 		t.Fatalf("%d race_time cases, want at least 5", n)
 	}
 }
+
+// paddock#375: the pit wall URL is empty, or an absolute http(s) URL with a host.
+func TestCheckPitwall(t *testing.T) {
+	for base, ok := range map[string]bool{
+		"":                          true,
+		"http://pitwall.example":    true,
+		"https://pitwall.example/":  true,
+		"pitwall.example":           false,
+		"ftp://pitwall.example":     false,
+		"https://":                  false,
+		"http://pitwall.example:x/": false,
+		"http://[::1":               false,
+	} {
+		if err := CheckPitwall(base); (err == nil) != ok {
+			t.Errorf("CheckPitwall(%q) = %v, want ok=%t", base, err, ok)
+		}
+	}
+}

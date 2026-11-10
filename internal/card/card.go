@@ -29,6 +29,7 @@ package card
 
 import (
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -146,6 +147,26 @@ func Build(ended *eventsv1.SessionEnded, pitwallURL string) (Card, bool) {
 		c.Timestamp = at.AsTime().UTC()
 	}
 	return c, true
+}
+
+// CheckPitwall reports whether base can be the pit wall's base URL: empty (no
+// link), or an absolute http or https URL with a host. A value without a scheme
+// would make an embed URL Discord refuses (paddock#375).
+func CheckPitwall(base string) error {
+	if base == "" {
+		return nil
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return fmt.Errorf("%q is not a URL: %w", base, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%q must be an absolute http or https URL", base)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("%q has no host", base)
+	}
+	return nil
 }
 
 // SessionLink is a session's page on the pit wall, "<base>/?session=<sid>", or
