@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.5](https://github.com/those-who-run/podium/compare/v0.1.4...v0.1.5) (2026-11-12)
+
+
+### Bug Fixes
+
+* **podium:** refuse a TWR_PITWALL_URL that can't be a link ([#30](https://github.com/those-who-run/podium/issues/30)) ([d042ecf](https://github.com/those-who-run/podium/commit/d042ecf8bdf8ae5390a6ed52853feb01cb4c1671))
+
+
+### Dependencies
+
+* Go 1.27.4 ([#31](https://github.com/those-who-run/podium/issues/31)) ([23167c8](https://github.com/those-who-run/podium/commit/23167c80666b56d000ba9ded8580140ea70c69fe))
+
 ## [0.1.4](https://github.com/those-who-run/podium/compare/v0.1.3...v0.1.4) (2026-11-01)
 
 
