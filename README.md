@@ -24,7 +24,8 @@ one after another. `podium card --sid SID` reads session `SID`'s
 `session.ended` from the `EVENTS` stream at `TWR_NATS_URL` instead, for the
 source `--src` (by default `TWR_PODIUM_SRC`, or `live`). `--pitwall URL`, by
 default `TWR_PITWALL_URL`, links each card's title to the session on the pit
-wall: `<URL>/?session=<sid>`.
+wall: `<URL>/?session=<sid>`. A value that is not an absolute `http` or
+`https` URL with a host exits 2, printing no card.
 
 ```console
 $ podium card --pitwall http://pitwall.home.arpa ended.jsonl
@@ -105,7 +106,7 @@ Its settings:
 | `TWR_PODIUM_SINK` | `discord`, or `console`, which writes each card to the log | `discord` |
 | `TWR_DISCORD_RESULTS_CHANNEL_ID` | The results channel. Unset with the `discord` sink turns cards off: no consumer, nothing posted (as v1) | unset |
 | `TWR_DISCORD_BOT_TOKEN` | The bot's token, radio's name for the shared Secret; needed with a channel | unset |
-| `TWR_PITWALL_URL` | The pit wall's base URL each card's title links to | no link |
+| `TWR_PITWALL_URL` | The pit wall's base URL each card's title links to: an absolute `http` or `https` URL with a host, such as `https://pitwall.example`, or empty; anything else stops podium at start-up | no link |
 | `TWR_PODIUM_SRC` | The source whose sessions it posts | `live` |
 | `TWR_NATS_URL` | The NATS server; needed when cards are on | unset |
 

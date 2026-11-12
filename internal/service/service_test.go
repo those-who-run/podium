@@ -135,6 +135,36 @@ func TestConfigFromEnvRefusesWhatCardsCannotRunWith(t *testing.T) {
 	}
 }
 
+// paddock#375: TWR_PITWALL_URL is empty or an absolute http(s) URL with a host.
+func TestConfigFromEnvChecksThePitwallURL(t *testing.T) {
+	for _, c := range []struct {
+		name, url string
+		ok        bool
+	}{
+		{"unset", "", true},
+		{"http", "http://pitwall.example", true},
+		{"https", "https://pitwall.example", true},
+		{"a trailing slash", "https://pitwall.example/", true},
+		{"no scheme", "pitwall.example", false},
+		{"a host and port, no scheme", "pitwall.example:8080", false},
+		{"another scheme", "ftp://pitwall.example", false},
+		{"no host", "https://", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := ConfigFromEnv(env(map[string]string{"TWR_PITWALL_URL": c.url}))
+			if c.ok {
+				if err != nil || got.Pitwall != c.url {
+					t.Errorf("ConfigFromEnv = %q, %v; want %q, nil", got.Pitwall, err, c.url)
+				}
+				return
+			}
+			if err == nil || !strings.HasPrefix(err.Error(), "TWR_PITWALL_URL: ") {
+				t.Errorf("ConfigFromEnv error = %v, want one naming TWR_PITWALL_URL", err)
+			}
+		})
+	}
+}
+
 func TestConfigFromEnvRefusesAnUnknownLevel(t *testing.T) {
 	_, err := ConfigFromEnv(env(map[string]string{"LOG_LEVEL": "loud"}))
 	if err == nil || !strings.HasPrefix(err.Error(), "LOG_LEVEL: ") {

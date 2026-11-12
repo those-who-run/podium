@@ -139,3 +139,26 @@ func TestReadBySIDWithNoServer(t *testing.T) {
 		t.Error("no error with no server")
 	}
 }
+
+// paddock#375: a --pitwall or TWR_PITWALL_URL that can't be a link is a usage
+// error, and no card is printed.
+func TestCardRefusesABadPitwallURL(t *testing.T) {
+	file := ended("real-nuc-fuji-timed-2026-10-15")
+	for _, tc := range []struct {
+		name string
+		args []string
+		vars map[string]string
+	}{
+		{"flag without a scheme", []string{"--pitwall", "pitwall.example", file}, nil},
+		{"flag with another scheme", []string{"--pitwall", "ftp://pitwall.example", file}, nil},
+		{"flag without a host", []string{"--pitwall", "https://", file}, nil},
+		{"environment without a scheme", []string{file}, map[string]string{"TWR_PITWALL_URL": "pitwall.example"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out, errs := runCard(t, tc.args, tc.vars)
+			if code != 2 || out != "" || !strings.Contains(errs, "TWR_PITWALL_URL") {
+				t.Errorf("exit %d, stdout %q, stderr %q; want 2, no card and a message naming the setting", code, out, errs)
+			}
+		})
+	}
+}

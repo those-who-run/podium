@@ -50,6 +50,10 @@ func cardCommand(ctx context.Context, args []string, getenv func(string) string,
 		}
 		return 2
 	}
+	if err := card.CheckPitwall(*pitwall); err != nil {
+		_, _ = fmt.Fprintf(stderr, "--pitwall (or TWR_PITWALL_URL): %v\n", err)
+		return 2
+	}
 	if (*sid == "") != (flags.NArg() == 1) || flags.NArg() > 1 {
 		_, _ = fmt.Fprintln(stderr, "usage: podium card [--pitwall URL] FILE | podium card [--pitwall URL] [--src SRC] --sid SID")
 		return 2
